@@ -1,0 +1,14 @@
+# Lance la CLI skill-distiller sur un projet cible monté en volume.
+#
+#   TARGET_PROJECT=/chemin/vers/projet-cible \
+#     docker compose run --rm skill-distiller init <sujet>
+#
+# TARGET_PROJECT défaut sur le répertoire courant.
+
+services:
+  skill-distiller:
+    build: .
+    image: skill-distiller
+    working_dir: /work
+    volumes:
+      - ${TARGET_PROJECT:-.}:/work

@@ -1,0 +1,10 @@
+# Rien de tout cela n'a sa place dans l'image : métadonnées git et IDE,
+# état de session (agent/, tmp/, threads/), artefacts Python.
+.git
+.worktrees
+.idea
+agent
+tmp
+threads
+__pycache__
+*.pyc

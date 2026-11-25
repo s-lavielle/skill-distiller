@@ -51,6 +51,10 @@ interventions humaines, distillation initiale comme réintégration :
 skill-distiller/
 ├── README.md                  ce fichier
 ├── SKILL.md                   le workflow 5 étapes, générique, multi-agents
+├── Dockerfile                 image de la CLI (Python 3, git, curl)
+├── docker-compose.yml         service pour lancer la CLI sur un projet
+│                              cible monté en volume
+├── .dockerignore
 ├── templates/                 modèles d'artefacts (étapes 1, 3, 4, 5)
 ├── bin/
 │   └── skill-distiller        CLI Python 3 sans dépendance
@@ -129,6 +133,47 @@ python3 <chemin>/bin/skill-distiller new <sujet>     # [--force]
   fiche) ; `--force` pour régénérer un `05-skill-final.md` déjà rempli.
 
 Les tests de la CLI se lancent avec `python3 -m unittest discover -s tests`.
+
+### Conteneurisation
+
+Un `Dockerfile` et un `docker-compose.yml` permettent d'exécuter la CLI
+sans installer Python sur l'hôte. L'image embarque **Python 3, git et
+curl** (git pour les opérations sur le projet cible monté, curl pour le
+diagnostic réseau de `diff --fetch`).
+
+Construire l'image :
+
+```
+docker build -t skill-distiller .
+```
+
+Lancer une commande : le projet cible est monté en `/work`, qui est le
+répertoire de travail du conteneur (donc la racine attendue par la CLI) :
+
+```
+docker compose run --rm skill-distiller init <sujet>
+```
+
+Le projet cible se précise avec la variable `TARGET_PROJECT` (défaut : le
+répertoire courant) :
+
+```
+TARGET_PROJECT=/chemin/vers/projet-cible \
+  docker compose run --rm skill-distiller check <sujet>
+```
+
+Sans compose :
+
+```
+docker run --rm -v /chemin/vers/projet-cible:/work skill-distiller diff <sujet> --fetch
+```
+
+Les tests de la CLI se lancent dans le conteneur :
+
+```
+docker run --rm --entrypoint python3 skill-distiller \
+  -m unittest discover -s /opt/skill-distiller/tests
+```
 
 ## Positionnement
 
