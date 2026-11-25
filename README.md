@@ -147,22 +147,27 @@ Construire l'image :
 docker build -t skill-distiller .
 ```
 
-Lancer une commande : le projet cible est monté en `/work`, qui est le
-répertoire de travail du conteneur (donc la racine attendue par la CLI) :
+**Modèle compose — conteneur longue durée** : le service reste en vie, la
+CLI s'exécute par `exec` sans recréer de conteneur à chaque commande. Le
+projet cible est monté en `/work`, répertoire de travail du conteneur
+(donc la racine attendue par la CLI) :
 
 ```
-docker compose run --rm skill-distiller init <sujet>
+docker compose up -d
+docker compose exec skill-distiller skill-distiller init <sujet>
+docker compose exec skill-distiller skill-distiller check <sujet>
+docker compose down
 ```
 
 Le projet cible se précise avec la variable `TARGET_PROJECT` (défaut : le
 répertoire courant) :
 
 ```
-TARGET_PROJECT=/chemin/vers/projet-cible \
-  docker compose run --rm skill-distiller check <sujet>
+TARGET_PROJECT=/chemin/vers/projet-cible docker compose up -d
 ```
 
-Sans compose :
+**Usage ponctuel** (sans compose) : un conteneur par commande, détruit à
+la fin :
 
 ```
 docker run --rm -v /chemin/vers/projet-cible:/work skill-distiller diff <sujet> --fetch
@@ -171,8 +176,7 @@ docker run --rm -v /chemin/vers/projet-cible:/work skill-distiller diff <sujet> 
 Les tests de la CLI se lancent dans le conteneur :
 
 ```
-docker run --rm --entrypoint python3 skill-distiller \
-  -m unittest discover -s /opt/skill-distiller/tests
+docker compose exec skill-distiller python3 -m unittest discover -s /opt/skill-distiller/tests
 ```
 
 ## Positionnement
