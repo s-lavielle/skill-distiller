@@ -41,7 +41,9 @@ répertoire surchargeable) :
 | 5 | `05-skill-final.md` | le skill rédigé, autonome et justifié |
 
 Chaque étape est validée avec l'utilisateur avant la suivante. Le détail :
-[`SKILL.md`](SKILL.md).
+[`SKILL.md`](SKILL.md). Le déroulé pas à pas — commandes à lancer et
+interventions humaines, distillation initiale comme réintégration :
+[`docs/sequences-de-travail.md`](docs/sequences-de-travail.md).
 
 ## Contenu du dépôt
 
@@ -64,6 +66,8 @@ skill-distiller/
 └── docs/
     ├── methode.md             thèse → antithèse → synthèse, pourquoi
     │                          « distillation », place dans le paysage
+    ├── sequences-de-travail.md  déroulé pas à pas : commandes et
+    │                          interventions humaines (initiale, maj)
     ├── etat-de-l-art.md       SkillFusion, Skill-Synthesizer, SkillGen,
     │                          Frankenstein, AutoSkill, survey 2608.29596
     └── skill-repositories.md  documentation du registre de sources
