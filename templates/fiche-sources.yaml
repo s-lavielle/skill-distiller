@@ -1,0 +1,25 @@
+# Fiche de sources — étape 1 du workflow skill-distiller.
+#
+# Une entrée par source. Champs :
+#   ref              URL ou chemin de la source.
+#   langue           langue de la source.
+#   points_a_retenir ce qu'on veut en tirer, SPÉCIFIQUEMENT : règles,
+#                    processus, garde-fous visés — pas un résumé vague.
+#   ignorer          ce qui ne concerne pas le projet cible : habillage,
+#                    marketing, spécificités d'outil.
+#
+# langue_cible : la langue de rédaction du skill final (français par
+# défaut ; le champ est conservé pour les autres cas).
+#
+# Présenter la fiche à l'utilisateur et attendre sa validation avant
+# l'étape 2 (synthèse brute).
+
+sources:
+  - ref: ""
+    langue: ""
+    points_a_retenir:
+      - ""
+    ignorer:
+      - ""
+
+langue_cible: français
