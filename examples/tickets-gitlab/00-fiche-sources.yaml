@@ -1,0 +1,54 @@
+# Fiche de sources — skill « créer les tickets GitLab »
+# Validée en session le 2026-11-24. Étape 1a du workflow de synthèse.
+langue_cible: français   # défaut
+
+sources:
+  - ref: mattpocock/skills — to-tickets (via mhrsdev/AI-Agent-Skills-Library, copie dans
+    organized-skills/product-planning-issues/mattpocock-skills/skills/engineering/to-issues)
+    langue: anglais
+    points_a_retenir:
+      - découpage en tranches verticales (tracer bullets) : chaque ticket traverse
+        toutes les couches nécessaires et se vérifie seul
+      - interdit le découpage par couche technique (une bille front, une bille back…)
+      - liens de blocage réels uniquement : « impossible de démarrer sans l'autre »,
+        pas « je préfère faire A avant B »
+      - frontière de travail : les tickets sans bloqueur non résolu sont prenables en parallèle
+      - validation humaine avant publication : quiz sur granularité et blocages,
+        rien ne part sur le tracker sans accord
+      - exception aux tranches verticales : refactor large → expand / migrate / contract
+      - ordre de création : les bloqueurs d'abord, pour pouvoir les référencer
+    ignorer:
+      - la configuration du tracker (setup-matt-pocock-skills)
+      - les labels propres à mattpocock (ready-for-agent)
+      - la sortie en fichiers locaux .scratch/ (on vise GitLab)
+
+  - ref: alinaqi/ticket-craft
+    langue: anglais
+    points_a_retenir:
+      - critères INVEST + « agent-ready » : un ticket doit pouvoir être exécuté
+        sans question de clarification
+      - types de tickets : Feature / Bug / Dette technique, chacun avec son gabarit
+      - critères d'acceptation au format Given-When-Then
+      - détection automatique de contexte : code concerné, patterns existants,
+        tests existants, commandes de vérification du projet
+      - checklist de validation du ticket avant sortie
+    ignorer:
+      - la cible « exécutable par Claude Code » (nos tickets visent des agents
+        et des humains, dans notre écosystème)
+
+  - ref: mattpocock/skills — to-prd (même copie mhrsdev)
+    langue: anglais
+    points_a_retenir:
+      - le PRD comme source des tickets : problème, solution, user stories,
+        décisions, hors-périmètre
+      - la section « hors périmètre » comme garde-fou explicite du découpage
+    ignorer:
+      - la publication du PRD sur le tracker
+
+# Remarques de validation (session du 2026-11-24) :
+# - to-tickets et to-issues sont le même skill (copie mhrsdev de l'original) :
+#   une seule entrée, pour éviter le doublon.
+# - « ignorer » porte sur la mécanique de tracker étrangère et la cible
+#   Claude Code.
+# - Ce qu'aucune source ne couvre (GitLab spécifiquement, règles internes,
+#   justification métier) relève de l'étape 2 (amendements).
