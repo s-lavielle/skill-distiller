@@ -77,3 +77,17 @@ Ce qui a manqué pendant une exécution est intégré au workflow : la
 réconciliation des sources multiples, par exemple, a été ajoutée après
 coup, à l'usage. C'est ce qui rend la méthode réutilisable — et ce
 document reste ouvert à ses propres amendements.
+
+## Le cycle de vie : créer, puis faire évoluer
+
+Une distillation n'est pas à sens unique. Les sources bougent, et le
+skill distillé dérive en silence si personne ne regarde. La
+**réintégration** (voir `SKILL.md`) prolonge le cycle : les sources sont
+**figées** à la lecture (copie conservée dans le lot), `skill-distiller
+diff` compare la copie figée à la source actuelle, et le processus est
+refait **sur les seuls changements** — synthèse des nouveautés, arbitrage
+humain, skill final vN avec note de sources datée.
+
+Mémoire du lot : tout est conservé (artefacts, sources figées, cycles de
+réintégration) mais rien n'est versionné — **la solution est versionnée
+dans un dépôt, pas ses produits**.

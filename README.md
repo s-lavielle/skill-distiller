@@ -1,7 +1,7 @@
 # skill-distiller — *auditable skill synthesis*
 
 Créer un skill **maîtrisé** à partir de sources existantes — sans jamais
-les copier.
+les copier — et le **faire évoluer** quand ses sources bougent.
 
 ## Présentation
 
@@ -20,6 +20,12 @@ le pourquoi de la méthode : [`docs/methode.md`](docs/methode.md).
 Le sous-titre du produit dit son exigence : ***auditable skill
 synthesis*** — chaque règle du skill produit est tracée, soit à une
 source, soit à un choix explicite de l'utilisateur.
+
+Le skill produit vit : les sources sont **figées** à la distillation
+(copie conservée dans le lot), et quand elles bougent, la
+**réintégration** refait le processus sur les seuls changements —
+`skill-distiller diff` en donne l'état. Voir [`SKILL.md`](SKILL.md)
+(« Faire évoluer le skill ») et [`docs/methode.md`](docs/methode.md).
 
 ## Le workflow
 
@@ -45,7 +51,8 @@ skill-distiller/
 ├── SKILL.md                   le workflow 5 étapes, générique, multi-agents
 ├── templates/                 modèles d'artefacts (étapes 1, 3, 4, 5)
 ├── bin/
-│   └── skill-distiller        CLI Node.js sans dépendance (init/check/new)
+│   └── skill-distiller        CLI Node.js sans dépendance
+│                              (init/check/diff/new)
 ├── tests/                     tests de la CLI (node --test, sans dépendance)
 ├── src/
 │   └── skill-repositories.yaml  registre de découverte de sources
@@ -84,22 +91,29 @@ Aucune dépendance : ni OpenCode, ni boilersuit — le format cible est le
 
 ### CLI
 
-Trois commandes, Node.js sans dépendance, à lancer **depuis la racine du
+Quatre commandes, Node.js sans dépendance, à lancer **depuis la racine du
 projet cible** :
 
 ```
 node <chemin>/bin/skill-distiller init <sujet>    # [--dir <racine>]
 node <chemin>/bin/skill-distiller check <sujet>   # [--dir <racine>]
+node <chemin>/bin/skill-distiller diff <sujet>    # [--fetch]
 node <chemin>/bin/skill-distiller new <sujet>     # [--force]
 ```
 
 - `init <sujet>` — crée `threads/<sujet>/` (racine surchargeable par
   `--dir`, ex. `--dir atelier`), pré-remplit les artefacts depuis
-  `templates/` et ajoute la racine au `.gitignore` du projet cible ;
+  `templates/`, crée le répertoire `sources/` des copies figées et ajoute
+  la racine au `.gitignore` du projet cible ;
 - `check <sujet>` — vérifie la traçabilité : étapes complètes (00/01/04/05,
   plus 02/03 si plusieurs sources), chaque point de la synthèse tracé à
   une source, amendements cohérents (cible/contenu/conséquence), skill
   final rempli — code de sortie non nul si erreur ;
+- `diff <sujet>` — compare les sources figées (`sources/<id>/`) aux
+  sources actuelles (ref locale, ou `sources-actuelles/<id>/` après
+  rafraîchissement manuel, ou URL avec `--fetch`) et produit
+  `reintegrations/<date>/01-etat-des-sources.md` avec les diffs : c'est la
+  première étape de la réintégration ;
 - `new <sujet>` — génère l'ossature du skill final depuis la synthèse
   amendée (déroulé dérivé des points tracés, note de sources depuis la
   fiche) ; `--force` pour régénérer un `05-skill-final.md` déjà rempli.
