@@ -73,6 +73,10 @@ skill-distiller/
     └── skill-repositories.md  documentation du registre de sources
 ```
 
+**Hors versionné** (conservé sur disque, jamais commité) : `tmp/` (fichiers
+d'échange), `.idea/`, `threads/` (lots de distillation) et `agent/`
+(contexte et knowledge de l'agent).
+
 ## Installation
 
 Aucune dépendance : ni OpenCode, ni boilersuit — le format cible est le
