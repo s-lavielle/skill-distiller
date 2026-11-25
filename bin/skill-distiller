@@ -1,0 +1,364 @@
+#!/usr/bin/env node
+'use strict';
+
+// skill-distiller — CLI du workflow de distillation de skills (SKILL.md).
+//
+// Sans dépendance. S'exécute depuis la racine du PROJET CIBLE :
+//   node <chemin>/bin/skill-distiller <init|check|new> <sujet> [--dir <racine>]
+//
+// Artefacts dans <racine>/<sujet>/ (racine par défaut : threads/, surcharge
+// par --dir — voir SKILL.md, section « Artefacts »).
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ROOT = path.resolve(__dirname, '..');
+const TEMPLATES_DIR = path.join(ROOT, 'templates');
+
+const FILES = {
+  fiche: '00-fiche-sources.yaml',
+  brute: '01-synthese-brute.md',
+  reconciliation: '02-reconciliation.md',
+  reconciliee: '03-synthese-reconciliee.md',
+  amendements: '04-amendements.md',
+  final: '05-skill-final.md',
+};
+
+const TEMPLATE_FILES = [
+  ['fiche-sources.yaml', FILES.fiche],
+  ['reconciliation.md', FILES.reconciliation],
+  ['amendements.md', FILES.amendements],
+  ['skill-final.md', FILES.final],
+];
+
+function usage(message) {
+  if (message) process.stderr.write(`Erreur : ${message}\n\n`);
+  process.stderr.write(
+    'Usage : skill-distiller <init|check|new> <sujet> [--dir <racine>] [--force]\n\n' +
+      '  init <sujet>   crée <racine>/<sujet>/ et pré-remplit les artefacts\n' +
+      '                 depuis templates/ ; ajoute <racine>/ au .gitignore\n' +
+      '  check <sujet>  vérifie les artefacts : étapes complètes, traçabilité\n' +
+      '                 des points, amendements cohérents, skill final rempli\n' +
+      '  new <sujet>    génère l\'ossature du skill final depuis la synthèse\n' +
+      '                 amendée (--force pour écraser un 05 non vide)\n\n' +
+      '  --dir <racine> racine des artefacts (défaut : threads/)\n'
+  );
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const args = { command: argv[0], sujet: null, dir: 'threads', force: false };
+  const rest = argv.slice(1);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--dir') {
+      args.dir = rest[++i];
+      if (!args.dir) usage('--dir exige une valeur');
+    } else if (a === '--force') {
+      args.force = true;
+    } else if (a.startsWith('--')) {
+      usage(`option inconnue : ${a}`);
+    } else if (args.sujet == null) {
+      args.sujet = a;
+    } else {
+      usage(`argument en trop : ${a}`);
+    }
+  }
+  return args;
+}
+
+function slugify(s) {
+  return s.trim().replace(/\s+/g, '-');
+}
+
+// Un champ « rempli » a une valeur qui n'est pas un gabarit `<...>`.
+function isFilled(value) {
+  const v = (value || '').trim();
+  return v.length > 0 && !v.startsWith('<');
+}
+
+function readIfExists(file) {
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+}
+
+// Analyse minimale de la fiche de sources (format contrôlé du template).
+function parseFiche(text) {
+  const refs = [];
+  let langue = null;
+  for (const line of text.split('\n')) {
+    const mRef = line.match(/^\s*-\s*ref:\s*(.*)$/);
+    if (mRef) {
+      refs.push(mRef[1].trim());
+      continue;
+    }
+    const mLangue = line.match(/^langue_cible:\s*(.*)$/);
+    if (mLangue) langue = mLangue[1].trim();
+  }
+  return { refs, langue };
+}
+
+// Titres de la synthèse, au niveau le plus fin (### si présent, sinon ##).
+function synthesisHeadings(text) {
+  const lines = text.split('\n');
+  const h3 = lines.filter((l) => /^###\s/.test(l));
+  const chosen = h3.length > 0 ? h3 : lines.filter((l) => /^##\s/.test(l));
+  return chosen.map((l) => l.replace(/^#+\s*/, '').trim());
+}
+
+function markersOf(heading) {
+  const out = [];
+  const re = /\[([A-Za-z][A-Za-z0-9_-]*)\]/g;
+  let m;
+  while ((m = re.exec(heading)) !== null) out.push(m[1]);
+  return out;
+}
+
+function cleanHeading(heading) {
+  return heading
+    .replace(/^#+\s*/, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/^\d+(\.\d+)*\.?\s+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Titre tel qu'affiché dans les messages : sans marqueurs, mais avec sa
+// numérotation, pour que le point signalé soit retrouvable dans le document.
+function displayHeading(heading) {
+  return heading
+    .replace(/^#+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function frontMatter(text) {
+  const lines = text.split('\n');
+  if (lines[0].trim() !== '---') return null;
+  const fm = {};
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') return fm;
+    const m = lines[i].match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (m) fm[m[1]] = m[2].trim();
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- init
+
+function commandInit(args) {
+  const cwd = process.cwd();
+  const lot = path.resolve(cwd, args.dir, slugify(args.sujet));
+  if (fs.existsSync(lot) && fs.readdirSync(lot).length > 0) {
+    usage(`répertoire déjà rempli : ${lot}`);
+  }
+  fs.mkdirSync(lot, { recursive: true });
+  for (const [template, dest] of TEMPLATE_FILES) {
+    const src = path.join(TEMPLATES_DIR, template);
+    const content = fs.readFileSync(src, 'utf8').replaceAll('<sujet>', slugify(args.sujet));
+    fs.writeFileSync(path.join(lot, dest), content);
+    process.stdout.write(`créé   ${path.join(args.dir, slugify(args.sujet), dest)}\n`);
+  }
+
+  // Règle du workflow : le répertoire de travail n'est jamais versionné.
+  const entry = `${args.dir.replace(/\\/g, '/').replace(/\/+$/, '')}/`;
+  const gitignore = path.join(cwd, '.gitignore');
+  const existing = readIfExists(gitignore) || '';
+  const lines = existing.split('\n').map((l) => l.trim());
+  if (lines.includes(entry)) {
+    process.stdout.write(`ignoré ${entry} (déjà dans .gitignore)\n`);
+  } else {
+    const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+    fs.writeFileSync(gitignore, `${existing}${sep}${entry}\n`);
+    process.stdout.write(`ignoré ${entry} (ajouté au .gitignore)\n`);
+  }
+  process.stdout.write(`\nLot prêt : ${lot}\n`);
+}
+
+// ---------------------------------------------------------------- check
+
+function commandCheck(args) {
+  const cwd = process.cwd();
+  const lot = path.resolve(cwd, args.dir, slugify(args.sujet));
+  if (!fs.existsSync(lot)) usage(`lot introuvable : ${lot}`);
+
+  const errors = [];
+  const warnings = [];
+  const ok = [];
+  const at = (name) => path.join(lot, name);
+  const texts = {};
+  for (const name of Object.values(FILES)) texts[name] = readIfExists(at(name));
+
+  // 1. Fiche de sources
+  const ficheText = texts[FILES.fiche];
+  let sources = [];
+  if (ficheText == null) {
+    errors.push(`${FILES.fiche} manquant`);
+  } else {
+    const fiche = parseFiche(ficheText);
+    sources = fiche.refs.filter((r) => isFilled(r));
+    if (sources.length === 0) errors.push('fiche : aucune source déclarée (ref)');
+    else ok.push(`fiche : ${sources.length} source(s) déclarée(s)`);
+    if (!isFilled(fiche.langue)) warnings.push('fiche : langue_cible absente ou vide (français par défaut)');
+  }
+
+  // 2. Étapes complètes
+  const multi = sources.length >= 2;
+  const required = [FILES.fiche, FILES.brute, FILES.amendements, FILES.final];
+  if (multi) required.push(FILES.reconciliation, FILES.reconciliee);
+  for (const name of required) {
+    if (texts[name] == null) errors.push(`${name} manquant (étape incomplète)`);
+  }
+  ok.push(
+    multi
+      ? 'étapes : sources multiples — réconciliation attendue (02, 03)'
+      : 'étapes : source unique — la synthèse brute fait foi'
+  );
+
+  // 3. Traçabilité de la synthèse (03 si présent, sinon 01)
+  const synthName = texts[FILES.reconciliee] != null ? FILES.reconciliee : FILES.brute;
+  const synth = texts[synthName];
+  if (synth != null) {
+    const lines = synth.split('\n');
+    const h3 = lines.filter((l) => /^###\s/.test(l));
+    const headings = h3.length > 0 ? h3 : lines.filter((l) => /^##\s/.test(l));
+    let untraced = 0;
+    const markers = new Set();
+    for (const h of headings) {
+      const found = markersOf(h);
+      found.forEach((m) => markers.add(m));
+      if (found.length === 0) {
+        untraced++;
+        errors.push(`traçabilité [${synthName}] : point non tracé — « ${displayHeading(h)} »`);
+      }
+    }
+    if (headings.length > 0 && markers.size === 0) {
+      errors.push(`traçabilité [${synthName}] : aucun marqueur de source détecté`);
+    } else if (untraced === 0 && headings.length > 0) {
+      ok.push(`traçabilité [${synthName}] : ${headings.length} point(s) tracé(s) (marqueurs ${[...markers].map((m) => `[${m}]`).join(', ')})`);
+    }
+  }
+
+  // 4. Amendements cohérents
+  const amend = texts[FILES.amendements];
+  if (amend != null) {
+    for (const section of ['Ajouts', 'Amendements', 'Cadre']) {
+      if (!new RegExp(`^##\\s+${section}\\b`, 'm').test(amend)) {
+        errors.push(`amendements : section « ${section} » absente`);
+      }
+    }
+    const mSection = amend.match(/^##\s+Amendements\b[\s\S]*?(?=^##\s|(?![\s\S]))/m);
+    const section = mSection ? mSection[0] : '';
+    const entries = section.split(/^###\s+/m).slice(1);
+    for (const entry of entries) {
+      const title = entry.split('\n')[0].trim();
+      for (const field of ['Cible', 'Contenu', 'Conséquence']) {
+        const m = entry.match(new RegExp(`^-\\s*${field}\\s*:\\s*(.*)$`, 'im'));
+        if (!m || !isFilled(m[1])) {
+          errors.push(`amendements : « ${displayHeading(title)} » — champ ${field} absent ou à remplir`);
+        }
+      }
+    }
+    if (entries.length > 0) ok.push(`amendements : ${entries.length} entrée(s) contrôlée(s)`);
+  }
+
+  // 5. Skill final rempli
+  const final = texts[FILES.final];
+  if (final != null) {
+    const fm = frontMatter(final);
+    if (fm == null) errors.push('skill final : front-matter absent');
+    else {
+      if (!isFilled(fm.name)) errors.push('skill final : name absent ou gabarit');
+      if (!isFilled(fm.description)) errors.push('skill final : description absente ou gabarit');
+      if (isFilled(fm.name) && isFilled(fm.description)) ok.push('skill final : front-matter rempli');
+    }
+  }
+
+  process.stdout.write(`Contrôle de ${path.relative(cwd, lot) || '.'}/\n`);
+  for (const line of ok) process.stdout.write(`  ✓ ${line}\n`);
+  for (const line of warnings) process.stdout.write(`  ⚠ ${line}\n`);
+  for (const line of errors) process.stdout.write(`  ✗ ${line}\n`);
+  process.stdout.write(`\n${errors.length} erreur(s), ${warnings.length} avertissement(s)\n`);
+  process.exit(errors.length > 0 ? 1 : 0);
+}
+
+// ---------------------------------------------------------------- new
+
+function commandNew(args) {
+  const cwd = process.cwd();
+  const slug = slugify(args.sujet);
+  const lot = path.resolve(cwd, args.dir, slug);
+  const synthName = readIfExists(path.join(lot, FILES.reconciliee)) != null ? FILES.reconciliee : FILES.brute;
+  const synth = readIfExists(path.join(lot, synthName));
+  if (synth == null) usage(`synthèse introuvable dans ${lot} (${FILES.brute} ou ${FILES.reconciliee})`);
+
+  const finalPath = path.join(lot, FILES.final);
+  const existing = readIfExists(finalPath);
+  if (existing != null && !args.force) {
+    const fm = frontMatter(existing);
+    if (fm != null && isFilled(fm.name)) {
+      usage(`${FILES.final} existe déjà avec du contenu — --force pour le régénérer`);
+    }
+  }
+
+  const steps = synthesisHeadings(synth).map(cleanHeading).filter((h) => h.length > 0);
+  const ficheText = readIfExists(path.join(lot, FILES.fiche));
+  const refs = ficheText ? parseFiche(ficheText).refs.filter((r) => isFilled(r)) : [];
+
+  const out = [
+    '---',
+    `name: ${slug}`,
+    'description: <à compléter — ce que fait le skill et quand l\'utiliser.>',
+    '---',
+    '',
+    `# ${args.sujet.trim()}`,
+    '',
+    '## Objectif',
+    '',
+    '<Le but du skill : le problème qu\'il résout, le résultat produit.>',
+    '',
+    '## Déroulé',
+    '',
+    ...(steps.length > 0
+      ? steps.map((s, i) => `${i + 1}. ${s} — <à expliciter d'après la synthèse amendée>.`)
+      : ['1. <à décrire — la synthèse ne porte aucun point tracé.>']),
+    '',
+    '## Rappels',
+    '',
+    '- <Règle non évidente, avec sa justification (le pourquoi, pas seulement le quoi).>',
+    '',
+    '---',
+    '',
+    '## Note de sources',
+    '',
+    'Ce skill s\'inspire de :',
+    ...(refs.length > 0 ? refs.map((r) => `- ${r}`) : ['- <aucune source dans la fiche>']),
+    'À conserver pour l\'entretien futur du skill.',
+    '',
+  ].join('\n');
+
+  fs.writeFileSync(finalPath, out);
+  process.stdout.write(`écrit  ${path.relative(cwd, finalPath)}\n`);
+  process.stdout.write(`ossature : ${steps.length} étape(s) dérivée(s) de ${synthName}, ${refs.length} source(s) citée(s)\n`);
+  process.stdout.write('À compléter, puis relancer `check`.\n');
+}
+
+// ---------------------------------------------------------------- main
+
+const args = parseArgs(process.argv.slice(2));
+if (!args.command) usage();
+switch (args.command) {
+  case 'init':
+    if (!args.sujet) usage('init exige un sujet');
+    commandInit(args);
+    break;
+  case 'check':
+    if (!args.sujet) usage('check exige un sujet');
+    commandCheck(args);
+    break;
+  case 'new':
+    if (!args.sujet) usage('new exige un sujet');
+    commandNew(args);
+    break;
+  default:
+    usage(`commande inconnue : ${args.command}`);
+}
