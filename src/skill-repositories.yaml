@@ -1,0 +1,141 @@
+# Repositories de skills connus — registre de découverte.
+#
+# Liste de dépôts qui hébergent des collections de skills, tenue comme
+# source de découverte et future source d'import pour alimenter la
+# distillation de nouveaux skills. Aucune fonctionnalité ne consomme ce
+# fichier pour l'instant : c'est un registre de référence, en attente
+# d'usage futur.
+#
+# Clés d'une entrée :
+#   id           : identifiant unique de l'entrée, forme
+#                  <owner>-<nom-en-kebab> ; clé stable du registre ;
+#   name         : nom du dépôt ;
+#   owner        : propriétaire ou organisation du dépôt ;
+#   url          : URL du dépôt ;
+#   type         : nature du dépôt (skills_collection, skills_library,
+#                  skill_system_orchestrator, personas_and_skill_bundles,
+#                  index_catalogue) ;
+#   scope        : domaines couverts, en liste (minuscules, tirets bas) ;
+#   description  : ce que contient le dépôt, en une phrase ;
+#   verification : état de vérification de l'entrée
+#                  (verified_current_search, verified_in_prior_search,
+#                  url_needs_validation).
+#
+# Documentation : docs/skill-repositories.md
+skill_repositories:
+  - id: ind4x-ai-agent-skills
+    name: AI Agent Skills
+    owner: ind4x
+    url: https://github.com/ind4x/ai-agent-skills
+    type: skills_collection
+    scope:
+      - design
+      - ui_ux
+      - frontend_design
+    description: "Collection de Skills au format standard pour agents, avec des compétences design et UI/UX."
+    verification: verified_current_search
+
+  - id: itsual-agent-skills-collection
+    name: Agent Skills Collection
+    owner: itsual
+    url: https://github.com/itsual/agent-skills-collection
+    type: skills_collection
+    scope:
+      - engineering
+      - product
+      - design_ux
+      - marketing
+      - research
+    description: "Collection modulaire couvrant notamment Design & UX, Product Management, engineering, marketing et recherche."
+    verification: verified_current_search
+
+  - id: mhrsdev-ai-agent-skills-library
+    name: AI Agent Skills Library
+    owner: mhrsdev
+    url: https://github.com/mhrsdev/AI-Agent-Skills-Library
+    type: skills_library
+    scope:
+      - frontend_ui
+      - responsive_design
+      - engineering
+      - testing
+      - product_planning
+      - knowledge_management
+      - skill_authoring
+    description: "Bibliothèque de Skills organisée par domaines, dont UI, tests, planification produit et création de Skills."
+    verification: verified_in_prior_search
+
+  - id: sergekostenchuk-ui-ux-agent-skill-system
+    name: UI/UX Agent Skill System
+    owner: sergekostenchuk
+    url: https://github.com/sergekostenchuk/ui-ux-agent-skill-system
+    type: skill_system_orchestrator
+    scope:
+      - ui_ux
+      - skill_orchestration
+      - multi_agent_platforms
+      - evaluation
+    description: "Système spécialisé UI/UX avec Skills en cluster, orchestration et adaptations pour plusieurs environnements d'agents."
+    verification: verified_in_prior_search
+
+  - id: hueyexe-frontend-agent-skills
+    name: Frontend Agent Skills
+    owner: hueyexe
+    url: https://github.com/hueyexe/frontend-agent-skills
+    type: skills_collection
+    scope:
+      - ux_ui
+      - accessibility
+      - ux_research
+      - usability
+      - ux_writing
+    description: "Collection spécialisée frontend, UX/UI, accessibilité inclusive, recherche utilisateur et UX writing."
+    verification: verified_current_search
+
+  - id: mugluck-ux-ui-agent-skills
+    name: UX/UI Agent Skills
+    owner: Mugluck
+    url: https://github.com/Mugluck/ux-ui-agent-skills
+    type: skills_collection
+    scope:
+      - ux_ui
+      - accessibility
+      - design_systems
+    description: "Dépôt mentionné dans les échanges ; l'URL du propriétaire est à vérifier avant ingestion automatisée."
+    verification: url_needs_validation
+
+  - id: sahil-ss9-agent-personas
+    name: Agent Personas
+    owner: Sahil-SS9
+    url: https://github.com/Sahil-SS9/agent-personas
+    type: personas_and_skill_bundles
+    scope:
+      - design_partner
+      - design_system_engineering
+      - accessibility_engineering
+      - ux_research
+    description: "Personas, Skills portables et bundles de rôles spécialisés pour agents."
+    verification: verified_in_prior_search
+
+  - id: sandy4321-awesome-agent-skills
+    name: Awesome Agent Skills
+    owner: Sandy4321
+    url: https://github.com/Sandy4321/awesome-agent-skills-july2026
+    type: index_catalogue
+    scope:
+      - general_skills
+      - product_management
+    description: "Grand index de Skills et de collections ; à utiliser comme source de découverte, pas comme dépôt unique à importer en bloc."
+    verification: verified_in_prior_search
+
+  - id: magnus919-agent-skills
+    name: Agent Skills
+    owner: magnus919
+    url: https://github.com/magnus919/agent-skills
+    type: skills_collection
+    scope:
+      - organizational_design
+      - operational_design
+      - agent_frameworks
+    description: "Collection complémentaire orientée organisation et opérations, compatible avec plusieurs frameworks d'agents selon le dépôt."
+    verification: verified_in_prior_search
