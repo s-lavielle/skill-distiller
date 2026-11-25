@@ -18,7 +18,7 @@ existants et d'une doc, dans le projet cible.*
 ### 1. Ouvrir le lot
 
 ```
-node <chemin>/bin/skill-distiller init tickets-gitlab
+python3 <chemin>/bin/skill-distiller init tickets-gitlab
 ```
 
 Crée `threads/tickets-gitlab/` (artefacts 00, 02, 04, 05 pré-remplis
@@ -73,7 +73,7 @@ peut amender une règle déjà posée.
 ### 6. Étape 5 — Skill final
 
 ```
-node <chemin>/bin/skill-distiller new tickets-gitlab
+python3 <chemin>/bin/skill-distiller new tickets-gitlab
 ```
 
 Génère l'ossature de `05-skill-final.md` depuis la synthèse amendée :
@@ -87,7 +87,7 @@ termes techniques à leur première occurrence.
 ### 7. Contrôle
 
 ```
-node <chemin>/bin/skill-distiller check tickets-gitlab
+python3 <chemin>/bin/skill-distiller check tickets-gitlab
 ```
 
 Doit finir sur `0 erreur(s)` : étapes complètes, chaque point tracé à
@@ -111,7 +111,7 @@ distillé sans le refaire.*
 ### 1. État des sources
 
 ```
-node <chemin>/bin/skill-distiller diff tickets-gitlab
+python3 <chemin>/bin/skill-distiller diff tickets-gitlab
 ```
 
 Crée `reintegrations/<date>/01-etat-des-sources.md` : par source,

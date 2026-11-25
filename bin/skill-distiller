@@ -1,682 +1,646 @@
-#!/usr/bin/env node
-'use strict';
+#!/usr/bin/env python3
+"""skill-distiller — CLI du workflow de distillation de skills (SKILL.md).
 
-// skill-distiller — CLI du workflow de distillation de skills (SKILL.md).
-//
-// Sans dépendance. S'exécute depuis la racine du PROJET CIBLE :
-//   node <chemin>/bin/skill-distiller <init|check|new> <sujet> [--dir <racine>]
-//
-// Artefacts dans <racine>/<sujet>/ (racine par défaut : threads/, surcharge
-// par --dir — voir SKILL.md, section « Artefacts »).
+Sans dépendance (bibliothèque standard Python 3). S'exécute depuis la
+racine du PROJET CIBLE :
 
-const fs = require('node:fs');
-const path = require('node:path');
+    python3 <chemin>/bin/skill-distiller <init|check|diff|new> <sujet>
 
-const ROOT = path.resolve(__dirname, '..');
-const TEMPLATES_DIR = path.join(ROOT, 'templates');
+Artefacts dans <racine>/<sujet>/ (racine par défaut : threads/,
+surcharge par --dir — voir SKILL.md, section « Artefacts »).
+"""
 
-const FILES = {
-  fiche: '00-fiche-sources.yaml',
-  brute: '01-synthese-brute.md',
-  reconciliation: '02-reconciliation.md',
-  reconciliee: '03-synthese-reconciliee.md',
-  amendements: '04-amendements.md',
-  final: '05-skill-final.md',
-};
+import argparse
+import difflib
+import filecmp
+import re
+import sys
+import urllib.request
+from datetime import datetime
+from pathlib import Path
 
-const TEMPLATE_FILES = [
-  ['fiche-sources.yaml', FILES.fiche],
-  ['reconciliation.md', FILES.reconciliation],
-  ['amendements.md', FILES.amendements],
-  ['skill-final.md', FILES.final],
-];
+ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = ROOT / "templates"
 
-function usage(message) {
-  if (message) process.stderr.write(`Erreur : ${message}\n\n`);
-  process.stderr.write(
-    'Usage : skill-distiller <init|check|diff|new> <sujet> [--dir <racine>] [--force] [--fetch]\n\n' +
-      '  init <sujet>   crée <racine>/<sujet>/ et pré-remplit les artefacts\n' +
-      '                 depuis templates/ ; ajoute <racine>/ au .gitignore\n' +
-      '  check <sujet>  vérifie les artefacts : étapes complètes, traçabilité\n' +
-      '                 des points, amendements cohérents, skill final rempli\n' +
-      '  diff <sujet>   compare les sources figées (sources/<id>/) aux sources\n' +
-      '                 actuelles ; produit reintegrations/<date>/01-etat-des-\n' +
-      '                 sources.md et les diffs (première étape de réintégration)\n' +
-      '  new <sujet>    génère l\'ossature du skill final depuis la synthèse\n' +
-      '                 amendée (--force pour écraser un 05 non vide)\n\n' +
-      '  --dir <racine> racine des artefacts (défaut : threads/)\n' +
-      '  --fetch        pour diff : télécharger les sources http(s)\n'
-  );
-  process.exit(2);
+FILES = {
+    "fiche": "00-fiche-sources.yaml",
+    "brute": "01-synthese-brute.md",
+    "reconciliation": "02-reconciliation.md",
+    "reconciliee": "03-synthese-reconciliee.md",
+    "amendements": "04-amendements.md",
+    "final": "05-skill-final.md",
 }
 
-function parseArgs(argv) {
-  const args = { command: argv[0], sujet: null, dir: 'threads', force: false, fetch: false };
-  const rest = argv.slice(1);
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === '--dir') {
-      args.dir = rest[++i];
-      if (!args.dir) usage('--dir exige une valeur');
-    } else if (a === '--force') {
-      args.force = true;
-    } else if (a === '--fetch') {
-      args.fetch = true;
-    } else if (a.startsWith('--')) {
-      usage(`option inconnue : ${a}`);
-    } else if (args.sujet == null) {
-      args.sujet = a;
-    } else {
-      usage(`argument en trop : ${a}`);
-    }
-  }
-  return args;
-}
+TEMPLATE_FILES = [
+    ("fiche-sources.yaml", FILES["fiche"]),
+    ("reconciliation.md", FILES["reconciliation"]),
+    ("amendements.md", FILES["amendements"]),
+    ("skill-final.md", FILES["final"]),
+]
 
-function slugify(s) {
-  return s.trim().replace(/\s+/g, '-');
-}
 
-// Un champ « rempli » a une valeur qui n'est pas un gabarit `<...>`.
-function isFilled(value) {
-  const v = (value || '').trim();
-  return v.length > 0 && !v.startsWith('<');
-}
+def usage_error(message):
+    """Erreur d'usage : message + sortie avec code 2."""
+    sys.stderr.write(f"Erreur : {message}\n")
+    sys.stderr.write(
+        "Usage : skill-distiller <init|check|diff|new> <sujet> "
+        "[--dir <racine>] [--force] [--fetch]\n"
+        "Aide :  skill-distiller --help\n"
+    )
+    sys.exit(2)
 
-function readIfExists(file) {
-  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
-}
 
-// Analyse minimale de la fiche de sources (format contrôlé du template).
-// Une entrée : ref, langue, snapshot (copie figée), date_fige.
-function parseFiche(text) {
-  const entries = [];
-  let langue = null;
-  let current = null;
-  for (const line of text.split('\n')) {
-    const mRef = line.match(/^\s*-\s*ref:\s*(.*)$/);
-    if (mRef) {
-      current = { ref: mRef[1].trim(), langue: '', snapshot: '', date_fige: '' };
-      entries.push(current);
-      continue;
-    }
-    const mLangueCible = line.match(/^langue_cible:\s*(.*)$/);
-    if (mLangueCible) {
-      langue = mLangueCible[1].trim();
-      continue;
-    }
-    const mField = line.match(/^\s+(langue|snapshot|date_fige):\s*(.*)$/);
-    if (mField && current != null) current[mField[1]] = mField[2].trim();
-  }
-  return { entries, langue };
-}
+def slugify(text):
+    return re.sub(r"\s+", "-", text.strip())
 
-// Titres de la synthèse, au niveau le plus fin (### si présent, sinon ##).
-function synthesisHeadings(text) {
-  const lines = text.split('\n');
-  const h3 = lines.filter((l) => /^###\s/.test(l));
-  const chosen = h3.length > 0 ? h3 : lines.filter((l) => /^##\s/.test(l));
-  return chosen.map((l) => l.replace(/^#+\s*/, '').trim());
-}
 
-function markersOf(heading) {
-  const out = [];
-  const re = /\[([A-Za-z][A-Za-z0-9_-]*)\]/g;
-  let m;
-  while ((m = re.exec(heading)) !== null) out.push(m[1]);
-  return out;
-}
+def is_filled(value):
+    """Un champ « rempli » a une valeur qui n'est pas un gabarit <...>."""
+    v = (value or "").strip()
+    return len(v) > 0 and not v.startswith("<")
 
-function cleanHeading(heading) {
-  return heading
-    .replace(/^#+\s*/, '')
-    .replace(/\[[^\]]*\]/g, '')
-    .replace(/^\d+(\.\d+)*\.?\s+/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
-// Titre tel qu'affiché dans les messages : sans marqueurs, mais avec sa
-// numérotation, pour que le point signalé soit retrouvable dans le document.
-function displayHeading(heading) {
-  return heading
-    .replace(/^#+\s*/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+def read_if_exists(path):
+    path = Path(path)
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
-function frontMatter(text) {
-  const lines = text.split('\n');
-  if (lines[0].trim() !== '---') return null;
-  const fm = {};
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return fm;
-    const m = lines[i].match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (m) fm[m[1]] = m[2].trim();
-  }
-  return null;
-}
 
-// ---------------------------------------------------------------- init
+# ------------------------------------------------------------- analyse
 
-function commandInit(args) {
-  const cwd = process.cwd();
-  const lot = path.resolve(cwd, args.dir, slugify(args.sujet));
-  if (fs.existsSync(lot) && fs.readdirSync(lot).length > 0) {
-    usage(`répertoire déjà rempli : ${lot}`);
-  }
-  fs.mkdirSync(lot, { recursive: true });
-  for (const [template, dest] of TEMPLATE_FILES) {
-    const src = path.join(TEMPLATES_DIR, template);
-    const content = fs.readFileSync(src, 'utf8').replaceAll('<sujet>', slugify(args.sujet));
-    fs.writeFileSync(path.join(lot, dest), content);
-    process.stdout.write(`créé   ${path.join(args.dir, slugify(args.sujet), dest)}\n`);
-  }
+def parse_fiche(text):
+    """Analyse minimale de la fiche (format contrôlé du template).
 
-  // Mémoire du lot : les copies figées des sources (réintégration).
-  fs.mkdirSync(path.join(lot, 'sources'), { recursive: true });
-  process.stdout.write(`créé   ${path.join(args.dir, slugify(args.sujet), 'sources')}/\n`);
+    Une entrée : ref, langue, snapshot (copie figée), date_fige.
+    """
+    entries = []
+    langue = None
+    current = None
+    for line in text.split("\n"):
+        m_ref = re.match(r"^\s*-\s*ref:\s*(.*)$", line)
+        if m_ref:
+            current = {"ref": m_ref.group(1).strip(), "langue": "",
+                       "snapshot": "", "date_fige": ""}
+            entries.append(current)
+            continue
+        m_langue = re.match(r"^langue_cible:\s*(.*)$", line)
+        if m_langue:
+            langue = m_langue.group(1).strip()
+            continue
+        m_field = re.match(r"^\s+(langue|snapshot|date_fige):\s*(.*)$", line)
+        if m_field and current is not None:
+            current[m_field.group(1)] = m_field.group(2).strip()
+    return entries, langue
 
-  // Règle du workflow : le répertoire de travail n'est jamais versionné.
-  const entry = `${args.dir.replace(/\\/g, '/').replace(/\/+$/, '')}/`;
-  const gitignore = path.join(cwd, '.gitignore');
-  const existing = readIfExists(gitignore) || '';
-  const lines = existing.split('\n').map((l) => l.trim());
-  if (lines.includes(entry)) {
-    process.stdout.write(`ignoré ${entry} (déjà dans .gitignore)\n`);
-  } else {
-    const sep = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-    fs.writeFileSync(gitignore, `${existing}${sep}${entry}\n`);
-    process.stdout.write(`ignoré ${entry} (ajouté au .gitignore)\n`);
-  }
-  process.stdout.write(`\nLot prêt : ${lot}\n`);
-}
 
-// ---------------------------------------------------------------- check
+def synthesis_headings(text):
+    """Titres de la synthèse, au niveau le plus fin (### si présent, sinon ##)."""
+    lines = text.split("\n")
+    h3 = [line for line in lines if re.match(r"^###\s", line)]
+    chosen = h3 if h3 else [line for line in lines if re.match(r"^##\s", line)]
+    return [re.sub(r"^#+\s*", "", line).strip() for line in chosen]
 
-function commandCheck(args) {
-  const cwd = process.cwd();
-  const lot = path.resolve(cwd, args.dir, slugify(args.sujet));
-  if (!fs.existsSync(lot)) usage(`lot introuvable : ${lot}`);
 
-  const errors = [];
-  const warnings = [];
-  const ok = [];
-  const at = (name) => path.join(lot, name);
-  const texts = {};
-  for (const name of Object.values(FILES)) texts[name] = readIfExists(at(name));
+def markers_of(heading):
+    return re.findall(r"\[([A-Za-z][A-Za-z0-9_-]*)\]", heading)
 
-  // 1. Fiche de sources
-  const ficheText = texts[FILES.fiche];
-  let sources = [];
-  if (ficheText == null) {
-    errors.push(`${FILES.fiche} manquant`);
-  } else {
-    const fiche = parseFiche(ficheText);
-    sources = fiche.entries.filter((e) => isFilled(e.ref));
-    if (sources.length === 0) errors.push('fiche : aucune source déclarée (ref)');
-    else ok.push(`fiche : ${sources.length} source(s) déclarée(s)`);
-    if (!isFilled(fiche.langue)) warnings.push('fiche : langue_cible absente ou vide (français par défaut)');
-    for (const entry of sources) {
-      if (!isFilled(entry.snapshot)) {
-        warnings.push(`fiche : source « ${entry.ref} » sans copie figée (snapshot) — réintégration impossible`);
-      }
-    }
-  }
 
-  // 2. Étapes complètes
-  const multi = sources.length >= 2;
-  const required = [FILES.fiche, FILES.brute, FILES.amendements, FILES.final];
-  if (multi) required.push(FILES.reconciliation, FILES.reconciliee);
-  for (const name of required) {
-    if (texts[name] == null) errors.push(`${name} manquant (étape incomplète)`);
-  }
-  ok.push(
-    multi
-      ? 'étapes : sources multiples — réconciliation attendue (02, 03)'
-      : 'étapes : source unique — la synthèse brute fait foi'
-  );
+def clean_heading(heading):
+    """Titre du déroulé : sans marqueurs ni numérotation."""
+    out = re.sub(r"^#+\s*", "", heading)
+    out = re.sub(r"\[[^\]]*\]", "", out)
+    out = re.sub(r"^\d+(\.\d+)*\.?\s+", "", out)
+    return re.sub(r"\s+", " ", out).strip()
 
-  // 3. Traçabilité de la synthèse (03 si présent, sinon 01)
-  const synthName = texts[FILES.reconciliee] != null ? FILES.reconciliee : FILES.brute;
-  const synth = texts[synthName];
-  if (synth != null) {
-    const lines = synth.split('\n');
-    const h3 = lines.filter((l) => /^###\s/.test(l));
-    const headings = h3.length > 0 ? h3 : lines.filter((l) => /^##\s/.test(l));
-    let untraced = 0;
-    const markers = new Set();
-    for (const h of headings) {
-      const found = markersOf(h);
-      found.forEach((m) => markers.add(m));
-      if (found.length === 0) {
-        untraced++;
-        errors.push(`traçabilité [${synthName}] : point non tracé — « ${displayHeading(h)} »`);
-      }
-    }
-    if (headings.length > 0 && markers.size === 0) {
-      errors.push(`traçabilité [${synthName}] : aucun marqueur de source détecté`);
-    } else if (untraced === 0 && headings.length > 0) {
-      ok.push(`traçabilité [${synthName}] : ${headings.length} point(s) tracé(s) (marqueurs ${[...markers].map((m) => `[${m}]`).join(', ')})`);
-    }
-  }
 
-  // 4. Amendements cohérents
-  const amend = texts[FILES.amendements];
-  if (amend != null) {
-    for (const section of ['Ajouts', 'Amendements', 'Cadre']) {
-      if (!new RegExp(`^##\\s+${section}\\b`, 'm').test(amend)) {
-        errors.push(`amendements : section « ${section} » absente`);
-      }
-    }
-    const mSection = amend.match(/^##\s+Amendements\b[\s\S]*?(?=^##\s|(?![\s\S]))/m);
-    const section = mSection ? mSection[0] : '';
-    const entries = section.split(/^###\s+/m).slice(1);
-    for (const entry of entries) {
-      const title = entry.split('\n')[0].trim();
-      for (const field of ['Cible', 'Contenu', 'Conséquence']) {
-        const m = entry.match(new RegExp(`^-\\s*${field}\\s*:\\s*(.*)$`, 'im'));
-        if (!m || !isFilled(m[1])) {
-          errors.push(`amendements : « ${displayHeading(title)} » — champ ${field} absent ou à remplir`);
-        }
-      }
-    }
-    if (entries.length > 0) ok.push(`amendements : ${entries.length} entrée(s) contrôlée(s)`);
-  }
+def display_heading(heading):
+    """Titre dans les messages : sans marqueurs, avec la numérotation,
+    pour que le point signalé soit retrouvable dans le document."""
+    out = re.sub(r"^#+\s*", "", heading)
+    return re.sub(r"\s+", " ", out).strip()
 
-  // 5. Skill final rempli
-  const final = texts[FILES.final];
-  if (final != null) {
-    const fm = frontMatter(final);
-    if (fm == null) errors.push('skill final : front-matter absent');
-    else {
-      if (!isFilled(fm.name)) errors.push('skill final : name absent ou gabarit');
-      if (!isFilled(fm.description)) errors.push('skill final : description absente ou gabarit');
-      if (isFilled(fm.name) && isFilled(fm.description)) ok.push('skill final : front-matter rempli');
-    }
-  }
 
-  process.stdout.write(`Contrôle de ${path.relative(cwd, lot) || '.'}/\n`);
-  for (const line of ok) process.stdout.write(`  ✓ ${line}\n`);
-  for (const line of warnings) process.stdout.write(`  ⚠ ${line}\n`);
-  for (const line of errors) process.stdout.write(`  ✗ ${line}\n`);
-  process.stdout.write(`\n${errors.length} erreur(s), ${warnings.length} avertissement(s)\n`);
-  process.exit(errors.length > 0 ? 1 : 0);
-}
+def front_matter(text):
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    fields = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return fields
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return None
 
-// ---------------------------------------------------------------- new
 
-function commandNew(args) {
-  const cwd = process.cwd();
-  const slug = slugify(args.sujet);
-  const lot = path.resolve(cwd, args.dir, slug);
-  const synthName = readIfExists(path.join(lot, FILES.reconciliee)) != null ? FILES.reconciliee : FILES.brute;
-  const synth = readIfExists(path.join(lot, synthName));
-  if (synth == null) usage(`synthèse introuvable dans ${lot} (${FILES.brute} ou ${FILES.reconciliee})`);
+# ---------------------------------------------------------------- init
 
-  const finalPath = path.join(lot, FILES.final);
-  const existing = readIfExists(finalPath);
-  if (existing != null && !args.force) {
-    const fm = frontMatter(existing);
-    if (fm != null && isFilled(fm.name)) {
-      usage(`${FILES.final} existe déjà avec du contenu — --force pour le régénérer`);
-    }
-  }
+def command_init(args):
+    cwd = Path.cwd()
+    lot = (cwd / args.dir / slugify(args.sujet)).resolve()
+    if lot.exists() and any(lot.iterdir()):
+        usage_error(f"répertoire déjà rempli : {lot}")
+    lot.mkdir(parents=True, exist_ok=True)
+    for template, dest in TEMPLATE_FILES:
+        content = (TEMPLATES_DIR / template).read_text(encoding="utf-8")
+        content = content.replace("<sujet>", slugify(args.sujet))
+        (lot / dest).write_text(content, encoding="utf-8")
+        print(f"créé   {Path(args.dir) / slugify(args.sujet) / dest}")
 
-  const steps = synthesisHeadings(synth).map(cleanHeading).filter((h) => h.length > 0);
-  const ficheText = readIfExists(path.join(lot, FILES.fiche));
-  const refs = ficheText
-    ? parseFiche(ficheText).entries.filter((e) => isFilled(e.ref)).map((e) => e.ref)
-    : [];
+    # Mémoire du lot : les copies figées des sources (réintégration).
+    (lot / "sources").mkdir(exist_ok=True)
+    print(f"créé   {Path(args.dir) / slugify(args.sujet) / 'sources'}/")
 
-  const out = [
-    '---',
-    `name: ${slug}`,
-    'description: <à compléter — ce que fait le skill et quand l\'utiliser.>',
-    '---',
-    '',
-    `# ${args.sujet.trim()}`,
-    '',
-    '## Objectif',
-    '',
-    '<Le but du skill : le problème qu\'il résout, le résultat produit.>',
-    '',
-    '## Déroulé',
-    '',
-    ...(steps.length > 0
-      ? steps.map((s, i) => `${i + 1}. ${s} — <à expliciter d'après la synthèse amendée>.`)
-      : ['1. <à décrire — la synthèse ne porte aucun point tracé.>']),
-    '',
-    '## Rappels',
-    '',
-    '- <Règle non évidente, avec sa justification (le pourquoi, pas seulement le quoi).>',
-    '',
-    '---',
-    '',
-    '## Note de sources',
-    '',
-    'Ce skill s\'inspire de :',
-    ...(refs.length > 0 ? refs.map((r) => `- ${r}`) : ['- <aucune source dans la fiche>']),
-    'À conserver pour l\'entretien futur du skill.',
-    '',
-  ].join('\n');
+    # Règle du workflow : le répertoire de travail n'est jamais versionné.
+    entry = str(args.dir).replace("\\", "/").rstrip("/") + "/"
+    gitignore = cwd / ".gitignore"
+    existing = read_if_exists(gitignore) or ""
+    lines = [line.strip() for line in existing.split("\n")]
+    if entry in lines:
+        print(f"ignoré {entry} (déjà dans .gitignore)")
+    else:
+        sep = "\n" if existing and not existing.endswith("\n") else ""
+        gitignore.write_text(f"{existing}{sep}{entry}\n", encoding="utf-8")
+        print(f"ignoré {entry} (ajouté au .gitignore)")
+    print(f"\nLot prêt : {lot}")
 
-  fs.writeFileSync(finalPath, out);
-  process.stdout.write(`écrit  ${path.relative(cwd, finalPath)}\n`);
-  process.stdout.write(`ossature : ${steps.length} étape(s) dérivée(s) de ${synthName}, ${refs.length} source(s) citée(s)\n`);
-  process.stdout.write('À compléter, puis relancer `check`.\n');
-}
 
-// ---------------------------------------------------------------- diff
+# --------------------------------------------------------------- check
 
-// Liste les fichiers d'un chemin (fichier ou arborescence) : rel → abs.
-function walkFiles(root) {
-  const out = new Map();
-  if (!fs.existsSync(root)) return out;
-  if (fs.statSync(root).isFile()) {
-    out.set(path.basename(root), root);
-    return out;
-  }
-  const stack = [''];
-  while (stack.length > 0) {
-    const rel = stack.pop();
-    const abs = path.join(root, rel);
-    for (const name of fs.readdirSync(abs)) {
-      const relChild = rel === '' ? name : `${rel}/${name}`;
-      const absChild = path.join(abs, name);
-      if (fs.statSync(absChild).isDirectory()) stack.push(relChild);
-      else out.set(relChild, absChild);
-    }
-  }
-  return out;
-}
+def command_check(args):
+    cwd = Path.cwd()
+    lot = (cwd / args.dir / slugify(args.sujet)).resolve()
+    if not lot.exists():
+        usage_error(f"lot introuvable : {lot}")
 
-function isBinary(buf) {
-  return buf.includes(0);
-}
+    errors, warnings, ok = [], [], []
+    texts = {name: read_if_exists(lot / name) for name in FILES.values()}
 
-// Diff ligne à ligne (LCS) au format unifié. Renvoie '' si identique.
-function unifiedDiff(aText, bText, labelA, labelB) {
-  const aLines = aText.split('\n');
-  const bLines = bText.split('\n');
-  const n = aLines.length;
-  const m = bLines.length;
-  if (n * m > 4_000_000) return `--- ${labelA}\n+++ ${labelB}\n(diff trop volumineux, omis)\n`;
-  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = aLines[i] === bLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const ops = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (aLines[i] === bLines[j]) {
-      ops.push({ t: ' ', a: i, b: j });
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push({ t: '-', a: i, b: j });
-      i++;
-    } else {
-      ops.push({ t: '+', a: i, b: j });
-      j++;
-    }
-  }
-  while (i < n) {
-    ops.push({ t: '-', a: i, b: j });
-    i++;
-  }
-  while (j < m) {
-    ops.push({ t: '+', a: i, b: j });
-    j++;
-  }
+    # 1. Fiche de sources
+    fiche_text = texts[FILES["fiche"]]
+    sources = []
+    if fiche_text is None:
+        errors.append(f"{FILES['fiche']} manquant")
+    else:
+        entries, langue = parse_fiche(fiche_text)
+        sources = [e for e in entries if is_filled(e["ref"])]
+        if not sources:
+            errors.append("fiche : aucune source déclarée (ref)")
+        else:
+            ok.append(f"fiche : {len(sources)} source(s) déclarée(s)")
+        if not is_filled(langue):
+            warnings.append("fiche : langue_cible absente ou vide (français par défaut)")
+        for entry in sources:
+            if not is_filled(entry["snapshot"]):
+                warnings.append(
+                    f"fiche : source « {entry['ref']} » sans copie figée "
+                    "(snapshot) — réintégration impossible"
+                )
 
-  const CONTEXT = 3;
-  const changed = [];
-  for (let k = 0; k < ops.length; k++) if (ops[k].t !== ' ') changed.push(k);
-  if (changed.length === 0) return '';
-  const ranges = [];
-  for (const k of changed) {
-    const start = Math.max(0, k - CONTEXT);
-    const end = Math.min(ops.length - 1, k + CONTEXT);
-    if (ranges.length > 0 && start <= ranges[ranges.length - 1][1] + 1) {
-      ranges[ranges.length - 1][1] = Math.max(ranges[ranges.length - 1][1], end);
-    } else {
-      ranges.push([start, end]);
-    }
-  }
-  let out = `--- ${labelA}\n+++ ${labelB}\n`;
-  for (const [start, end] of ranges) {
-    const slice = ops.slice(start, end + 1);
-    const aCount = slice.filter((o) => o.t !== '+').length;
-    const bCount = slice.filter((o) => o.t !== '-').length;
-    out += `@@ -${slice[0].a + 1},${aCount} +${slice[0].b + 1},${bCount} @@\n`;
-    for (const o of slice) {
-      if (o.t === ' ') out += ` ${aLines[o.a]}\n`;
-      else if (o.t === '-') out += `-${aLines[o.a]}\n`;
-      else out += `+${bLines[o.b]}\n`;
-    }
-  }
-  return out;
-}
+    # 2. Étapes complètes
+    multi = len(sources) >= 2
+    required = [FILES["fiche"], FILES["brute"], FILES["amendements"], FILES["final"]]
+    if multi:
+        required += [FILES["reconciliation"], FILES["reconciliee"]]
+    for name in required:
+        if texts[name] is None:
+            errors.append(f"{name} manquant (étape incomplète)")
+    ok.append(
+        "étapes : sources multiples — réconciliation attendue (02, 03)"
+        if multi
+        else "étapes : source unique — la synthèse brute fait foi"
+    )
 
-// Compare la copie figée à la source actuelle (fichiers ou répertoires).
-function diffTrees(snapRoot, curRoot) {
-  const snap = walkFiles(snapRoot);
-  const cur = walkFiles(curRoot);
-  const added = [];
-  const removed = [];
-  const changed = [];
-  const parts = [];
-  let same = 0;
-  for (const [rel, abs] of cur) {
-    if (!snap.has(rel)) {
-      added.push(rel);
-      continue;
-    }
-    const a = fs.readFileSync(snap.get(rel));
-    const b = fs.readFileSync(abs);
-    if (a.equals(b)) {
-      same++;
-      continue;
-    }
-    changed.push(rel);
-    if (isBinary(a) || isBinary(b)) {
-      parts.push(`--- snapshot/${rel}\n+++ actuel/${rel}\n(fichier binaire modifié, diff non produit)\n`);
-    } else {
-      parts.push(unifiedDiff(a.toString('utf8'), b.toString('utf8'), `snapshot/${rel}`, `actuel/${rel}`));
-    }
-  }
-  for (const rel of snap.keys()) if (!cur.has(rel)) removed.push(rel);
-  return { added, removed, changed, same, patch: parts.join('') };
-}
+    # 3. Traçabilité de la synthèse (03 si présent, sinon 01)
+    synth_name = FILES["reconciliee"] if texts[FILES["reconciliee"]] is not None else FILES["brute"]
+    synth = texts[synth_name]
+    if synth is not None:
+        lines = synth.split("\n")
+        h3 = [line for line in lines if re.match(r"^###\s", line)]
+        headings = h3 if h3 else [line for line in lines if re.match(r"^##\s", line)]
+        untraced = 0
+        markers = set()
+        for heading in headings:
+            found = markers_of(heading)
+            markers.update(found)
+            if not found:
+                untraced += 1
+                errors.append(
+                    f"traçabilité [{synth_name}] : point non tracé — "
+                    f"« {display_heading(heading)} »"
+                )
+        if headings and not markers:
+            errors.append(f"traçabilité [{synth_name}] : aucun marqueur de source détecté")
+        elif untraced == 0 and headings:
+            marks = ", ".join(f"[{m}]" for m in sorted(markers))
+            ok.append(
+                f"traçabilité [{synth_name}] : {len(headings)} point(s) tracé(s) "
+                f"(marqueurs {marks})"
+            )
 
-function timestamp() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
-}
+    # 4. Amendements cohérents
+    amend = texts[FILES["amendements"]]
+    if amend is not None:
+        for section in ("Ajouts", "Amendements", "Cadre"):
+            if not re.search(rf"^##\s+{section}\b", amend, re.M):
+                errors.append(f"amendements : section « {section} » absente")
+        m_section = re.search(r"^##\s+Amendements\b.*?(?=^##\s|\Z)", amend, re.M | re.S)
+        section = m_section.group(0) if m_section else ""
+        entries = re.split(r"^###\s+", section, flags=re.M)[1:]
+        for entry in entries:
+            title = entry.split("\n")[0].strip()
+            for field in ("Cible", "Contenu", "Conséquence"):
+                m = re.search(rf"^-\s*{field}\s*:\s*(.*)$", entry, re.M | re.I)
+                if not m or not is_filled(m.group(1)):
+                    errors.append(
+                        f"amendements : « {display_heading(title)} » — "
+                        f"champ {field} absent ou à remplir"
+                    )
+        if entries:
+            ok.append(f"amendements : {len(entries)} entrée(s) contrôlée(s)")
 
-// Téléchargement ponctuel, sans keep-alive : la socket se referme à la fin
-// de la réponse, sinon le process resterait en vie sur la connexion ouverte.
-function httpGet(url) {
-  return new Promise((resolve) => {
-    const mod = /^https:/.test(url) ? require('node:https') : require('node:http');
-    mod
-      .get(url, { agent: false }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          resolve(httpGet(new URL(res.headers.location, url).toString()));
-          return;
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          resolve({ error: `téléchargement impossible (${res.statusCode})` });
-          return;
-        }
-        let data = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve({ text: data }));
-      })
-      .on('error', (err) => resolve({ error: `téléchargement impossible (${err.message})` }));
-  });
-}
+    # 5. Skill final rempli
+    final = texts[FILES["final"]]
+    if final is not None:
+        fm = front_matter(final)
+        if fm is None:
+            errors.append("skill final : front-matter absent")
+        else:
+            if not is_filled(fm.get("name")):
+                errors.append("skill final : name absent ou gabarit")
+            if not is_filled(fm.get("description")):
+                errors.append("skill final : description absente ou gabarit")
+            if is_filled(fm.get("name")) and is_filled(fm.get("description")):
+                ok.append("skill final : front-matter rempli")
 
-// Résout la source actuelle d'une entrée, dans l'ordre :
-// ref locale, puis sources-actuelles/<id>/ (dépôt manuel), puis
-// téléchargement d'une ref http(s) avec --fetch.
-async function resolveCurrent(entry, lot, id, fetchEnabled) {
-  const refPath = path.resolve(process.cwd(), entry.ref);
-  if (fs.existsSync(refPath)) return { root: refPath, how: 'ref locale' };
-  const manual = path.join(lot, 'sources-actuelles', id);
-  if (fs.existsSync(manual)) return { root: manual, how: `sources-actuelles/${id}` };
-  if (fetchEnabled && /^https?:\/\//.test(entry.ref)) {
-    const got = await httpGet(entry.ref);
-    if (got.error) return { error: got.error };
-    return { text: got.text, how: 'téléchargée (--fetch)' };
-  }
-  return { unresolved: true };
-}
+    rel = lot.relative_to(cwd) if lot.is_relative_to(cwd) else lot
+    print(f"Contrôle de {rel}/")
+    for line in ok:
+        print(f"  ✓ {line}")
+    for line in warnings:
+        print(f"  ⚠ {line}")
+    for line in errors:
+        print(f"  ✗ {line}")
+    print(f"\n{len(errors)} erreur(s), {len(warnings)} avertissement(s)")
+    sys.exit(1 if errors else 0)
 
-async function commandDiff(args) {
-  const cwd = process.cwd();
-  const slug = slugify(args.sujet);
-  const lot = path.resolve(cwd, args.dir, slug);
-  const ficheText = readIfExists(path.join(lot, FILES.fiche));
-  if (ficheText == null) usage(`${FILES.fiche} introuvable dans ${lot}`);
-  const entries = parseFiche(ficheText).entries.filter((e) => isFilled(e.ref));
-  if (entries.length === 0) usage('fiche : aucune source déclarée (ref)');
 
-  let outDir = path.join(lot, 'reintegrations', timestamp());
-  for (let i = 2; fs.existsSync(outDir); i++) {
-    outDir = path.join(lot, 'reintegrations', `${timestamp()}-${i}`);
-  }
-  fs.mkdirSync(outDir, { recursive: true });
+# ---------------------------------------------------------------- diff
 
-  const rows = [];
-  const details = [];
-  const instructions = [];
-  let changes = 0;
+def walk_files(root):
+    """Liste les fichiers d'un chemin (fichier ou arborescence) : rel → abs."""
+    root = Path(root)
+    out = {}
+    if not root.exists():
+        return out
+    if root.is_file():
+        out[root.name] = root
+        return out
+    for path in root.rglob("*"):
+        if path.is_file():
+            out[path.relative_to(root).as_posix()] = path
+    return out
 
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const id = isFilled(entry.snapshot)
-      ? path.basename(entry.snapshot.trim().replace(/\/+$/, ''))
-      : `source-${i + 1}`;
-    const snapRoot = isFilled(entry.snapshot) ? path.resolve(lot, entry.snapshot) : null;
-    const figee = snapRoot != null && walkFiles(snapRoot).size > 0;
 
-    if (!figee) {
-      rows.push([entry.ref, '—', 'non figée']);
-      details.push(`### ${id} — ${entry.ref}\n\nPas de copie figée : figer la source dans \`${entry.snapshot || `sources/${id}/`}\` (voir SKILL.md, étape 1), puis relancer \`diff\`.\n`);
-      continue;
-    }
+def is_binary(data):
+    return b"\x00" in data
 
-    const resolved = await resolveCurrent(entry, lot, id, args.fetch);
-    if (resolved.error) {
-      rows.push([entry.ref, entry.date_fige || '—', 'erreur']);
-      details.push(`### ${id} — ${entry.ref}\n\n${resolved.error}.\n`);
-      continue;
-    }
-    if (resolved.unresolved) {
-      rows.push([entry.ref, entry.date_fige || '—', 'à rafraîchir']);
-      details.push(`### ${id} — ${entry.ref}\n\nSource actuelle non résoluble automatiquement (ni chemin local, ni URL téléchargeable). Récupérer le contenu actuel, le déposer dans \`sources-actuelles/${id}/\`, puis relancer \`diff\`.\n`);
-      instructions.push(`rafraîchir ${id} dans sources-actuelles/${id}/`);
-      continue;
-    }
 
-    let result;
-    if (resolved.text != null) {
-      // Ref téléchargée : comparable seulement à une copie figée en un fichier.
-      const snapFiles = [...walkFiles(snapRoot).values()];
-      if (snapFiles.length !== 1) {
-        rows.push([entry.ref, entry.date_fige || '—', 'à rafraîchir']);
-        details.push(`### ${id} — ${entry.ref}\n\nContenu téléchargé, mais la copie figée compte ${snapFiles.length} fichiers : déposer le contenu actuel dans \`sources-actuelles/${id}/\` et relancer \`diff\`.\n`);
-        instructions.push(`rafraîchir ${id} dans sources-actuelles/${id}/`);
-        continue;
-      }
-      const a = fs.readFileSync(snapFiles[0], 'utf8');
-      const patch = unifiedDiff(a, resolved.text, `snapshot/${path.basename(snapFiles[0])}`, 'actuel');
-      result =
-        patch === ''
-          ? { added: [], removed: [], changed: [], same: 1, patch: '' }
-          : { added: [], removed: [], changed: [path.basename(snapFiles[0])], same: 0, patch };
-    } else {
-      result = diffTrees(snapRoot, resolved.root);
-    }
+def unified_diff(a_text, b_text, label_a, label_b):
+    """Diff unifié (difflib). '' si identique."""
+    diff = difflib.unified_diff(
+        a_text.splitlines(keepends=True),
+        b_text.splitlines(keepends=True),
+        fromfile=label_a,
+        tofile=label_b,
+    )
+    return "".join(diff)
 
-    const delta = [];
-    if (result.changed.length > 0) delta.push(`${result.changed.length} modifié(s)`);
-    if (result.added.length > 0) delta.push(`${result.added.length} nouveau(x)`);
-    if (result.removed.length > 0) delta.push(`${result.removed.length} supprimé(s)`);
-    const etat = delta.length === 0 ? 'identique' : `modifié (${delta.join(', ')})`;
-    rows.push([entry.ref, entry.date_fige || '—', etat]);
-    if (delta.length > 0) changes++;
 
-    const patchName = `diff-${id}.patch`;
-    if (result.patch !== '') {
-      fs.writeFileSync(path.join(outDir, patchName), result.patch);
-    }
-    details.push(
-      `### ${id} — ${entry.ref}\n\n` +
-        `Source actuelle : ${resolved.how}. Copie figée le ${entry.date_fige || 'date inconnue'}.\n\n` +
-        (delta.length === 0
-          ? 'Aucun changement détecté.\n'
-          : `- Modifiés : ${result.changed.join(', ') || '—'}\n` +
-            `- Nouveaux : ${result.added.join(', ') || '—'}\n` +
-            `- Supprimés : ${result.removed.join(', ') || '—'}\n` +
-            (result.patch !== '' ? `\nDiff : \`${patchName}\`\n` : '')) +
-        '\n'
-    );
-  }
+def diff_trees(snap_root, cur_root):
+    """Compare la copie figée à la source actuelle (fichiers ou répertoires)."""
+    snap = walk_files(snap_root)
+    cur = walk_files(cur_root)
+    added, removed, changed, parts = [], [], [], []
+    same = 0
+    for rel, abs_path in sorted(cur.items()):
+        if rel not in snap:
+            added.append(rel)
+            continue
+        if filecmp.cmp(snap[rel], abs_path, shallow=False):
+            same += 1
+            continue
+        changed.append(rel)
+        a_data = snap[rel].read_bytes()
+        b_data = abs_path.read_bytes()
+        if is_binary(a_data) or is_binary(b_data):
+            parts.append(
+                f"--- snapshot/{rel}\n+++ actuel/{rel}\n"
+                "(fichier binaire modifié, diff non produit)\n"
+            )
+        else:
+            parts.append(
+                unified_diff(
+                    a_data.decode("utf-8", errors="replace"),
+                    b_data.decode("utf-8", errors="replace"),
+                    f"snapshot/{rel}",
+                    f"actuel/{rel}",
+                )
+            )
+    for rel in snap:
+        if rel not in cur:
+            removed.append(rel)
+    return {"added": added, "removed": removed, "changed": changed,
+            "same": same, "patch": "".join(parts)}
 
-  const report =
-    `# État des sources — ${slug}\n\n` +
-    `> Généré par \`skill-distiller diff\` le ${new Date().toISOString().slice(0, 16).replace('T', ' ')}. ` +
-    'Première étape de la réintégration (SKILL.md) : comparaison des copies\n' +
-    '> figées (`sources/<id>/`) aux sources actuelles.\n\n' +
-    '## Synthèse\n\n' +
-    '| Source | Figée le | État |\n|---|---|---|\n' +
-    rows.map((r) => `| ${r[0]} | ${r[1]} | ${r[2]} |\n`).join('') +
-    `\n${changes} source(s) avec changements, ${entries.length - changes} sans.\n\n` +
-    '## Détail\n\n' +
-    details.join('\n') +
-    (instructions.length > 0 ? `## À faire avant de poursuivre\n\n${instructions.map((s) => `- ${s}`).join('\n')}\n` : '');
 
-  const reportPath = path.join(outDir, '01-etat-des-sources.md');
-  fs.writeFileSync(reportPath, report);
-  process.stdout.write(`écrit  ${path.relative(cwd, reportPath)}\n`);
-  for (const r of rows) process.stdout.write(`  ${r[2] === 'identique' ? '✓' : '✗'} ${r[0]} — ${r[2]}\n`);
-  process.stdout.write('\nSuite (SKILL.md, réintégration) : 02-synthese-nouveautes.md, puis arbitrage.\n');
-}
+def timestamp():
+    return datetime.now().strftime("%Y-%m-%d-%H%M")
 
-// ---------------------------------------------------------------- main
 
-const args = parseArgs(process.argv.slice(2));
-if (!args.command) usage();
-switch (args.command) {
-  case 'init':
-    if (!args.sujet) usage('init exige un sujet');
-    commandInit(args);
-    break;
-  case 'check':
-    if (!args.sujet) usage('check exige un sujet');
-    commandCheck(args);
-    break;
-  case 'diff':
-    if (!args.sujet) usage('diff exige un sujet');
-    commandDiff(args).catch((err) => {
-      process.stderr.write(`Erreur : ${err.message}\n`);
-      process.exit(1);
-    });
-    break;
-  case 'new':
-    if (!args.sujet) usage('new exige un sujet');
-    commandNew(args);
-    break;
-  default:
-    usage(`commande inconnue : ${args.command}`);
-}
+def http_get(url):
+    """Téléchargement ponctuel ; les erreurs deviennent un message."""
+    try:
+        with urllib.request.urlopen(url, timeout=30) as res:
+            return {"text": res.read().decode("utf-8", errors="replace")}
+    except Exception as exc:  # URLError, HTTPError, timeout…
+        return {"error": f"téléchargement impossible ({exc})"}
+
+
+def resolve_current(entry, lot, source_id, fetch_enabled):
+    """Résout la source actuelle, dans l'ordre : ref locale, puis
+    sources-actuelles/<id>/ (dépôt manuel), puis téléchargement d'une
+    ref http(s) avec --fetch."""
+    ref_path = Path(entry["ref"])
+    if not ref_path.is_absolute():
+        ref_path = Path.cwd() / ref_path
+    if ref_path.exists():
+        return {"root": ref_path, "how": "ref locale"}
+    manual = lot / "sources-actuelles" / source_id
+    if manual.exists():
+        return {"root": manual, "how": f"sources-actuelles/{source_id}"}
+    if fetch_enabled and re.match(r"^https?://", entry["ref"]):
+        got = http_get(entry["ref"])
+        if "error" in got:
+            return {"error": got["error"]}
+        return {"text": got["text"], "how": "téléchargée (--fetch)"}
+    return {"unresolved": True}
+
+
+def command_diff(args):
+    cwd = Path.cwd()
+    slug = slugify(args.sujet)
+    lot = (cwd / args.dir / slug).resolve()
+    fiche_text = read_if_exists(lot / FILES["fiche"])
+    if fiche_text is None:
+        usage_error(f"{FILES['fiche']} introuvable dans {lot}")
+    entries = [e for e in parse_fiche(fiche_text)[0] if is_filled(e["ref"])]
+    if not entries:
+        usage_error("fiche : aucune source déclarée (ref)")
+
+    out_dir = lot / "reintegrations" / timestamp()
+    counter = 2
+    while out_dir.exists():
+        out_dir = lot / "reintegrations" / f"{timestamp()}-{counter}"
+        counter += 1
+    out_dir.mkdir(parents=True)
+
+    rows, details, instructions = [], [], []
+    changes = 0
+
+    for i, entry in enumerate(entries):
+        if is_filled(entry["snapshot"]):
+            source_id = Path(entry["snapshot"].strip().rstrip("/")).name
+        else:
+            source_id = f"source-{i + 1}"
+        snap_root = (lot / entry["snapshot"]).resolve() if is_filled(entry["snapshot"]) else None
+        figee = snap_root is not None and bool(walk_files(snap_root))
+
+        if not figee:
+            rows.append((entry["ref"], "—", "non figée"))
+            target = entry["snapshot"] or f"sources/{source_id}/"
+            details.append(
+                f"### {source_id} — {entry['ref']}\n\nPas de copie figée : figer la "
+                f"source dans `{target}` (voir SKILL.md, étape 1), puis relancer `diff`.\n"
+            )
+            continue
+
+        resolved = resolve_current(entry, lot, source_id, args.fetch)
+        if "error" in resolved:
+            rows.append((entry["ref"], entry["date_fige"] or "—", "erreur"))
+            details.append(f"### {source_id} — {entry['ref']}\n\n{resolved['error']}.\n")
+            continue
+        if resolved.get("unresolved"):
+            rows.append((entry["ref"], entry["date_fige"] or "—", "à rafraîchir"))
+            details.append(
+                f"### {source_id} — {entry['ref']}\n\nSource actuelle non résoluble "
+                "automatiquement (ni chemin local, ni URL téléchargeable). Récupérer le "
+                "contenu actuel, le déposer dans "
+                f"`sources-actuelles/{source_id}/`, puis relancer `diff`.\n"
+            )
+            instructions.append(f"rafraîchir {source_id} dans sources-actuelles/{source_id}/")
+            continue
+
+        if "text" in resolved:
+            # Ref téléchargée : comparable seulement à une copie figée en un fichier.
+            snap_files = list(walk_files(snap_root).values())
+            if len(snap_files) != 1:
+                rows.append((entry["ref"], entry["date_fige"] or "—", "à rafraîchir"))
+                details.append(
+                    f"### {source_id} — {entry['ref']}\n\nContenu téléchargé, mais la "
+                    f"copie figée compte {len(snap_files)} fichiers : déposer le contenu "
+                    f"actuel dans `sources-actuelles/{source_id}/` et relancer `diff`.\n"
+                )
+                instructions.append(f"rafraîchir {source_id} dans sources-actuelles/{source_id}/")
+                continue
+            snap_file = snap_files[0]
+            patch = unified_diff(
+                snap_file.read_text(encoding="utf-8", errors="replace"),
+                resolved["text"],
+                f"snapshot/{snap_file.name}",
+                "actuel",
+            )
+            result = ({"added": [], "removed": [], "changed": [], "same": 1, "patch": ""}
+                      if patch == "" else
+                      {"added": [], "removed": [], "changed": [snap_file.name],
+                       "same": 0, "patch": patch})
+        else:
+            result = diff_trees(snap_root, resolved["root"])
+
+        delta = []
+        if result["changed"]:
+            delta.append(f"{len(result['changed'])} modifié(s)")
+        if result["added"]:
+            delta.append(f"{len(result['added'])} nouveau(x)")
+        if result["removed"]:
+            delta.append(f"{len(result['removed'])} supprimé(s)")
+        etat = "identique" if not delta else f"modifié ({', '.join(delta)})"
+        rows.append((entry["ref"], entry["date_fige"] or "—", etat))
+        if delta:
+            changes += 1
+
+        patch_name = f"diff-{source_id}.patch"
+        if result["patch"]:
+            (out_dir / patch_name).write_text(result["patch"], encoding="utf-8")
+        details.append(
+            f"### {source_id} — {entry['ref']}\n\n"
+            f"Source actuelle : {resolved['how']}. "
+            f"Copie figée le {entry['date_fige'] or 'date inconnue'}.\n\n"
+            + (
+                "Aucun changement détecté.\n"
+                if not delta
+                else
+                f"- Modifiés : {', '.join(result['changed']) or '—'}\n"
+                f"- Nouveaux : {', '.join(result['added']) or '—'}\n"
+                f"- Supprimés : {', '.join(result['removed']) or '—'}\n"
+                + (f"\nDiff : `{patch_name}`\n" if result["patch"] else "")
+            )
+            + "\n"
+        )
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    report = (
+        f"# État des sources — {slug}\n\n"
+        f"> Généré par `skill-distiller diff` le {now}. "
+        "Première étape de la réintégration (SKILL.md) : comparaison des copies\n"
+        "> figées (`sources/<id>/`) aux sources actuelles.\n\n"
+        "## Synthèse\n\n"
+        "| Source | Figée le | État |\n|---|---|---|\n"
+        + "".join(f"| {ref} | {date} | {etat} |\n" for ref, date, etat in rows)
+        + f"\n{changes} source(s) avec changements, {len(entries) - changes} sans.\n\n"
+        "## Détail\n\n"
+        + "\n".join(details) + "\n"
+        + (
+            f"## À faire avant de poursuivre\n\n"
+            + "".join(f"- {item}\n" for item in instructions)
+            if instructions else ""
+        )
+    )
+    report_path = out_dir / "01-etat-des-sources.md"
+    report_path.write_text(report, encoding="utf-8")
+
+    try:
+        shown = report_path.relative_to(cwd)
+    except ValueError:
+        shown = report_path
+    print(f"écrit  {shown}")
+    for ref, _date, etat in rows:
+        print(f"  {'✓' if etat == 'identique' else '✗'} {ref} — {etat}")
+    print("\nSuite (SKILL.md, réintégration) : 02-synthese-nouveautes.md, puis arbitrage.")
+
+
+# ----------------------------------------------------------------- new
+
+def command_new(args):
+    cwd = Path.cwd()
+    slug = slugify(args.sujet)
+    lot = (cwd / args.dir / slug).resolve()
+    synth_name = (FILES["reconciliee"]
+                  if read_if_exists(lot / FILES["reconciliee"]) is not None
+                  else FILES["brute"])
+    synth = read_if_exists(lot / synth_name)
+    if synth is None:
+        usage_error(
+            f"synthèse introuvable dans {lot} "
+            f"({FILES['brute']} ou {FILES['reconciliee']})"
+        )
+
+    final_path = lot / FILES["final"]
+    existing = read_if_exists(final_path)
+    if existing is not None and not args.force:
+        fm = front_matter(existing)
+        if fm is not None and is_filled(fm.get("name")):
+            usage_error(
+                f"{FILES['final']} existe déjà avec du contenu — "
+                "--force pour le régénérer"
+            )
+
+    steps = [h for h in (clean_heading(x) for x in synthesis_headings(synth)) if h]
+    fiche_text = read_if_exists(lot / FILES["fiche"])
+    refs = ([e["ref"] for e in parse_fiche(fiche_text)[0] if is_filled(e["ref"])]
+            if fiche_text else [])
+
+    if steps:
+        derive = "".join(f"{i + 1}. {s} — <à expliciter d'après la synthèse amendée>.\n"
+                         for i, s in enumerate(steps))
+    else:
+        derive = "1. <à décrire — la synthèse ne porte aucun point tracé.>\n"
+    sources_note = ("".join(f"- {r}\n" for r in refs) if refs
+                    else "- <aucune source dans la fiche>\n")
+
+    out = (
+        "---\n"
+        f"name: {slug}\n"
+        "description: <à compléter — ce que fait le skill et quand l'utiliser.>\n"
+        "---\n\n"
+        f"# {args.sujet.strip()}\n\n"
+        "## Objectif\n\n"
+        "<Le but du skill : le problème qu'il résout, le résultat produit.>\n\n"
+        "## Déroulé\n\n"
+        + derive + "\n"
+        "## Rappels\n\n"
+        "- <Règle non évidente, avec sa justification (le pourquoi, pas "
+        "seulement le quoi).>\n\n"
+        "---\n\n"
+        "## Note de sources\n\n"
+        "Ce skill s'inspire de :\n"
+        + sources_note
+        + "À conserver pour l'entretien futur du skill.\n"
+    )
+    final_path.write_text(out, encoding="utf-8")
+    try:
+        shown = final_path.relative_to(cwd)
+    except ValueError:
+        shown = final_path
+    print(f"écrit  {shown}")
+    print(f"ossature : {len(steps)} étape(s) dérivée(s) de {synth_name}, "
+          f"{len(refs)} source(s) citée(s)")
+    print("À compléter, puis relancer `check`.")
+
+
+# ---------------------------------------------------------------- main
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="skill-distiller",
+        description="Workflow de distillation de skills — init, check, diff, new.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def common(subparser):
+        subparser.add_argument("sujet", help="sujet du lot (threads/<sujet>/)")
+        subparser.add_argument("--dir", default="threads",
+                               help="racine des artefacts (défaut : threads/)")
+
+    p_init = sub.add_parser("init", help="crée le lot et pré-remplit les artefacts")
+    common(p_init)
+
+    p_check = sub.add_parser("check", help="vérifie traçabilité et complétude")
+    common(p_check)
+
+    p_diff = sub.add_parser("diff", help="compare les sources figées aux sources actuelles")
+    common(p_diff)
+    p_diff.add_argument("--fetch", action="store_true",
+                        help="télécharger les sources http(s)")
+
+    p_new = sub.add_parser("new", help="génère l'ossature du skill final")
+    common(p_new)
+    p_new.add_argument("--force", action="store_true",
+                       help="écraser un 05-skill-final.md déjà rempli")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    if args.command == "init":
+        command_init(args)
+    elif args.command == "check":
+        command_check(args)
+    elif args.command == "diff":
+        command_diff(args)
+    elif args.command == "new":
+        command_new(args)
+
+
+if __name__ == "__main__":
+    main()
