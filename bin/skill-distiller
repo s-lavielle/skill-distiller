@@ -34,20 +34,24 @@ const TEMPLATE_FILES = [
 function usage(message) {
   if (message) process.stderr.write(`Erreur : ${message}\n\n`);
   process.stderr.write(
-    'Usage : skill-distiller <init|check|new> <sujet> [--dir <racine>] [--force]\n\n' +
+    'Usage : skill-distiller <init|check|diff|new> <sujet> [--dir <racine>] [--force] [--fetch]\n\n' +
       '  init <sujet>   crée <racine>/<sujet>/ et pré-remplit les artefacts\n' +
       '                 depuis templates/ ; ajoute <racine>/ au .gitignore\n' +
       '  check <sujet>  vérifie les artefacts : étapes complètes, traçabilité\n' +
       '                 des points, amendements cohérents, skill final rempli\n' +
+      '  diff <sujet>   compare les sources figées (sources/<id>/) aux sources\n' +
+      '                 actuelles ; produit reintegrations/<date>/01-etat-des-\n' +
+      '                 sources.md et les diffs (première étape de réintégration)\n' +
       '  new <sujet>    génère l\'ossature du skill final depuis la synthèse\n' +
       '                 amendée (--force pour écraser un 05 non vide)\n\n' +
-      '  --dir <racine> racine des artefacts (défaut : threads/)\n'
+      '  --dir <racine> racine des artefacts (défaut : threads/)\n' +
+      '  --fetch        pour diff : télécharger les sources http(s)\n'
   );
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  const args = { command: argv[0], sujet: null, dir: 'threads', force: false };
+  const args = { command: argv[0], sujet: null, dir: 'threads', force: false, fetch: false };
   const rest = argv.slice(1);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -56,6 +60,8 @@ function parseArgs(argv) {
       if (!args.dir) usage('--dir exige une valeur');
     } else if (a === '--force') {
       args.force = true;
+    } else if (a === '--fetch') {
+      args.fetch = true;
     } else if (a.startsWith('--')) {
       usage(`option inconnue : ${a}`);
     } else if (args.sujet == null) {
@@ -82,19 +88,27 @@ function readIfExists(file) {
 }
 
 // Analyse minimale de la fiche de sources (format contrôlé du template).
+// Une entrée : ref, langue, snapshot (copie figée), date_fige.
 function parseFiche(text) {
-  const refs = [];
+  const entries = [];
   let langue = null;
+  let current = null;
   for (const line of text.split('\n')) {
     const mRef = line.match(/^\s*-\s*ref:\s*(.*)$/);
     if (mRef) {
-      refs.push(mRef[1].trim());
+      current = { ref: mRef[1].trim(), langue: '', snapshot: '', date_fige: '' };
+      entries.push(current);
       continue;
     }
-    const mLangue = line.match(/^langue_cible:\s*(.*)$/);
-    if (mLangue) langue = mLangue[1].trim();
+    const mLangueCible = line.match(/^langue_cible:\s*(.*)$/);
+    if (mLangueCible) {
+      langue = mLangueCible[1].trim();
+      continue;
+    }
+    const mField = line.match(/^\s+(langue|snapshot|date_fige):\s*(.*)$/);
+    if (mField && current != null) current[mField[1]] = mField[2].trim();
   }
-  return { refs, langue };
+  return { entries, langue };
 }
 
 // Titres de la synthèse, au niveau le plus fin (### si présent, sinon ##).
@@ -159,6 +173,10 @@ function commandInit(args) {
     process.stdout.write(`créé   ${path.join(args.dir, slugify(args.sujet), dest)}\n`);
   }
 
+  // Mémoire du lot : les copies figées des sources (réintégration).
+  fs.mkdirSync(path.join(lot, 'sources'), { recursive: true });
+  process.stdout.write(`créé   ${path.join(args.dir, slugify(args.sujet), 'sources')}/\n`);
+
   // Règle du workflow : le répertoire de travail n'est jamais versionné.
   const entry = `${args.dir.replace(/\\/g, '/').replace(/\/+$/, '')}/`;
   const gitignore = path.join(cwd, '.gitignore');
@@ -195,10 +213,15 @@ function commandCheck(args) {
     errors.push(`${FILES.fiche} manquant`);
   } else {
     const fiche = parseFiche(ficheText);
-    sources = fiche.refs.filter((r) => isFilled(r));
+    sources = fiche.entries.filter((e) => isFilled(e.ref));
     if (sources.length === 0) errors.push('fiche : aucune source déclarée (ref)');
     else ok.push(`fiche : ${sources.length} source(s) déclarée(s)`);
     if (!isFilled(fiche.langue)) warnings.push('fiche : langue_cible absente ou vide (français par défaut)');
+    for (const entry of sources) {
+      if (!isFilled(entry.snapshot)) {
+        warnings.push(`fiche : source « ${entry.ref} » sans copie figée (snapshot) — réintégration impossible`);
+      }
+    }
   }
 
   // 2. Étapes complètes
@@ -302,7 +325,9 @@ function commandNew(args) {
 
   const steps = synthesisHeadings(synth).map(cleanHeading).filter((h) => h.length > 0);
   const ficheText = readIfExists(path.join(lot, FILES.fiche));
-  const refs = ficheText ? parseFiche(ficheText).refs.filter((r) => isFilled(r)) : [];
+  const refs = ficheText
+    ? parseFiche(ficheText).entries.filter((e) => isFilled(e.ref)).map((e) => e.ref)
+    : [];
 
   const out = [
     '---',
@@ -342,6 +367,292 @@ function commandNew(args) {
   process.stdout.write('À compléter, puis relancer `check`.\n');
 }
 
+// ---------------------------------------------------------------- diff
+
+// Liste les fichiers d'un chemin (fichier ou arborescence) : rel → abs.
+function walkFiles(root) {
+  const out = new Map();
+  if (!fs.existsSync(root)) return out;
+  if (fs.statSync(root).isFile()) {
+    out.set(path.basename(root), root);
+    return out;
+  }
+  const stack = [''];
+  while (stack.length > 0) {
+    const rel = stack.pop();
+    const abs = path.join(root, rel);
+    for (const name of fs.readdirSync(abs)) {
+      const relChild = rel === '' ? name : `${rel}/${name}`;
+      const absChild = path.join(abs, name);
+      if (fs.statSync(absChild).isDirectory()) stack.push(relChild);
+      else out.set(relChild, absChild);
+    }
+  }
+  return out;
+}
+
+function isBinary(buf) {
+  return buf.includes(0);
+}
+
+// Diff ligne à ligne (LCS) au format unifié. Renvoie '' si identique.
+function unifiedDiff(aText, bText, labelA, labelB) {
+  const aLines = aText.split('\n');
+  const bLines = bText.split('\n');
+  const n = aLines.length;
+  const m = bLines.length;
+  if (n * m > 4_000_000) return `--- ${labelA}\n+++ ${labelB}\n(diff trop volumineux, omis)\n`;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = aLines[i] === bLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (aLines[i] === bLines[j]) {
+      ops.push({ t: ' ', a: i, b: j });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ t: '-', a: i, b: j });
+      i++;
+    } else {
+      ops.push({ t: '+', a: i, b: j });
+      j++;
+    }
+  }
+  while (i < n) {
+    ops.push({ t: '-', a: i, b: j });
+    i++;
+  }
+  while (j < m) {
+    ops.push({ t: '+', a: i, b: j });
+    j++;
+  }
+
+  const CONTEXT = 3;
+  const changed = [];
+  for (let k = 0; k < ops.length; k++) if (ops[k].t !== ' ') changed.push(k);
+  if (changed.length === 0) return '';
+  const ranges = [];
+  for (const k of changed) {
+    const start = Math.max(0, k - CONTEXT);
+    const end = Math.min(ops.length - 1, k + CONTEXT);
+    if (ranges.length > 0 && start <= ranges[ranges.length - 1][1] + 1) {
+      ranges[ranges.length - 1][1] = Math.max(ranges[ranges.length - 1][1], end);
+    } else {
+      ranges.push([start, end]);
+    }
+  }
+  let out = `--- ${labelA}\n+++ ${labelB}\n`;
+  for (const [start, end] of ranges) {
+    const slice = ops.slice(start, end + 1);
+    const aCount = slice.filter((o) => o.t !== '+').length;
+    const bCount = slice.filter((o) => o.t !== '-').length;
+    out += `@@ -${slice[0].a + 1},${aCount} +${slice[0].b + 1},${bCount} @@\n`;
+    for (const o of slice) {
+      if (o.t === ' ') out += ` ${aLines[o.a]}\n`;
+      else if (o.t === '-') out += `-${aLines[o.a]}\n`;
+      else out += `+${bLines[o.b]}\n`;
+    }
+  }
+  return out;
+}
+
+// Compare la copie figée à la source actuelle (fichiers ou répertoires).
+function diffTrees(snapRoot, curRoot) {
+  const snap = walkFiles(snapRoot);
+  const cur = walkFiles(curRoot);
+  const added = [];
+  const removed = [];
+  const changed = [];
+  const parts = [];
+  let same = 0;
+  for (const [rel, abs] of cur) {
+    if (!snap.has(rel)) {
+      added.push(rel);
+      continue;
+    }
+    const a = fs.readFileSync(snap.get(rel));
+    const b = fs.readFileSync(abs);
+    if (a.equals(b)) {
+      same++;
+      continue;
+    }
+    changed.push(rel);
+    if (isBinary(a) || isBinary(b)) {
+      parts.push(`--- snapshot/${rel}\n+++ actuel/${rel}\n(fichier binaire modifié, diff non produit)\n`);
+    } else {
+      parts.push(unifiedDiff(a.toString('utf8'), b.toString('utf8'), `snapshot/${rel}`, `actuel/${rel}`));
+    }
+  }
+  for (const rel of snap.keys()) if (!cur.has(rel)) removed.push(rel);
+  return { added, removed, changed, same, patch: parts.join('') };
+}
+
+function timestamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+// Téléchargement ponctuel, sans keep-alive : la socket se referme à la fin
+// de la réponse, sinon le process resterait en vie sur la connexion ouverte.
+function httpGet(url) {
+  return new Promise((resolve) => {
+    const mod = /^https:/.test(url) ? require('node:https') : require('node:http');
+    mod
+      .get(url, { agent: false }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          resolve(httpGet(new URL(res.headers.location, url).toString()));
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          resolve({ error: `téléchargement impossible (${res.statusCode})` });
+          return;
+        }
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => resolve({ text: data }));
+      })
+      .on('error', (err) => resolve({ error: `téléchargement impossible (${err.message})` }));
+  });
+}
+
+// Résout la source actuelle d'une entrée, dans l'ordre :
+// ref locale, puis sources-actuelles/<id>/ (dépôt manuel), puis
+// téléchargement d'une ref http(s) avec --fetch.
+async function resolveCurrent(entry, lot, id, fetchEnabled) {
+  const refPath = path.resolve(process.cwd(), entry.ref);
+  if (fs.existsSync(refPath)) return { root: refPath, how: 'ref locale' };
+  const manual = path.join(lot, 'sources-actuelles', id);
+  if (fs.existsSync(manual)) return { root: manual, how: `sources-actuelles/${id}` };
+  if (fetchEnabled && /^https?:\/\//.test(entry.ref)) {
+    const got = await httpGet(entry.ref);
+    if (got.error) return { error: got.error };
+    return { text: got.text, how: 'téléchargée (--fetch)' };
+  }
+  return { unresolved: true };
+}
+
+async function commandDiff(args) {
+  const cwd = process.cwd();
+  const slug = slugify(args.sujet);
+  const lot = path.resolve(cwd, args.dir, slug);
+  const ficheText = readIfExists(path.join(lot, FILES.fiche));
+  if (ficheText == null) usage(`${FILES.fiche} introuvable dans ${lot}`);
+  const entries = parseFiche(ficheText).entries.filter((e) => isFilled(e.ref));
+  if (entries.length === 0) usage('fiche : aucune source déclarée (ref)');
+
+  let outDir = path.join(lot, 'reintegrations', timestamp());
+  for (let i = 2; fs.existsSync(outDir); i++) {
+    outDir = path.join(lot, 'reintegrations', `${timestamp()}-${i}`);
+  }
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const rows = [];
+  const details = [];
+  const instructions = [];
+  let changes = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const id = isFilled(entry.snapshot)
+      ? path.basename(entry.snapshot.trim().replace(/\/+$/, ''))
+      : `source-${i + 1}`;
+    const snapRoot = isFilled(entry.snapshot) ? path.resolve(lot, entry.snapshot) : null;
+    const figee = snapRoot != null && walkFiles(snapRoot).size > 0;
+
+    if (!figee) {
+      rows.push([entry.ref, '—', 'non figée']);
+      details.push(`### ${id} — ${entry.ref}\n\nPas de copie figée : figer la source dans \`${entry.snapshot || `sources/${id}/`}\` (voir SKILL.md, étape 1), puis relancer \`diff\`.\n`);
+      continue;
+    }
+
+    const resolved = await resolveCurrent(entry, lot, id, args.fetch);
+    if (resolved.error) {
+      rows.push([entry.ref, entry.date_fige || '—', 'erreur']);
+      details.push(`### ${id} — ${entry.ref}\n\n${resolved.error}.\n`);
+      continue;
+    }
+    if (resolved.unresolved) {
+      rows.push([entry.ref, entry.date_fige || '—', 'à rafraîchir']);
+      details.push(`### ${id} — ${entry.ref}\n\nSource actuelle non résoluble automatiquement (ni chemin local, ni URL téléchargeable). Récupérer le contenu actuel, le déposer dans \`sources-actuelles/${id}/\`, puis relancer \`diff\`.\n`);
+      instructions.push(`rafraîchir ${id} dans sources-actuelles/${id}/`);
+      continue;
+    }
+
+    let result;
+    if (resolved.text != null) {
+      // Ref téléchargée : comparable seulement à une copie figée en un fichier.
+      const snapFiles = [...walkFiles(snapRoot).values()];
+      if (snapFiles.length !== 1) {
+        rows.push([entry.ref, entry.date_fige || '—', 'à rafraîchir']);
+        details.push(`### ${id} — ${entry.ref}\n\nContenu téléchargé, mais la copie figée compte ${snapFiles.length} fichiers : déposer le contenu actuel dans \`sources-actuelles/${id}/\` et relancer \`diff\`.\n`);
+        instructions.push(`rafraîchir ${id} dans sources-actuelles/${id}/`);
+        continue;
+      }
+      const a = fs.readFileSync(snapFiles[0], 'utf8');
+      const patch = unifiedDiff(a, resolved.text, `snapshot/${path.basename(snapFiles[0])}`, 'actuel');
+      result =
+        patch === ''
+          ? { added: [], removed: [], changed: [], same: 1, patch: '' }
+          : { added: [], removed: [], changed: [path.basename(snapFiles[0])], same: 0, patch };
+    } else {
+      result = diffTrees(snapRoot, resolved.root);
+    }
+
+    const delta = [];
+    if (result.changed.length > 0) delta.push(`${result.changed.length} modifié(s)`);
+    if (result.added.length > 0) delta.push(`${result.added.length} nouveau(x)`);
+    if (result.removed.length > 0) delta.push(`${result.removed.length} supprimé(s)`);
+    const etat = delta.length === 0 ? 'identique' : `modifié (${delta.join(', ')})`;
+    rows.push([entry.ref, entry.date_fige || '—', etat]);
+    if (delta.length > 0) changes++;
+
+    const patchName = `diff-${id}.patch`;
+    if (result.patch !== '') {
+      fs.writeFileSync(path.join(outDir, patchName), result.patch);
+    }
+    details.push(
+      `### ${id} — ${entry.ref}\n\n` +
+        `Source actuelle : ${resolved.how}. Copie figée le ${entry.date_fige || 'date inconnue'}.\n\n` +
+        (delta.length === 0
+          ? 'Aucun changement détecté.\n'
+          : `- Modifiés : ${result.changed.join(', ') || '—'}\n` +
+            `- Nouveaux : ${result.added.join(', ') || '—'}\n` +
+            `- Supprimés : ${result.removed.join(', ') || '—'}\n` +
+            (result.patch !== '' ? `\nDiff : \`${patchName}\`\n` : '')) +
+        '\n'
+    );
+  }
+
+  const report =
+    `# État des sources — ${slug}\n\n` +
+    `> Généré par \`skill-distiller diff\` le ${new Date().toISOString().slice(0, 16).replace('T', ' ')}. ` +
+    'Première étape de la réintégration (SKILL.md) : comparaison des copies\n' +
+    '> figées (`sources/<id>/`) aux sources actuelles.\n\n' +
+    '## Synthèse\n\n' +
+    '| Source | Figée le | État |\n|---|---|---|\n' +
+    rows.map((r) => `| ${r[0]} | ${r[1]} | ${r[2]} |\n`).join('') +
+    `\n${changes} source(s) avec changements, ${entries.length - changes} sans.\n\n` +
+    '## Détail\n\n' +
+    details.join('\n') +
+    (instructions.length > 0 ? `## À faire avant de poursuivre\n\n${instructions.map((s) => `- ${s}`).join('\n')}\n` : '');
+
+  const reportPath = path.join(outDir, '01-etat-des-sources.md');
+  fs.writeFileSync(reportPath, report);
+  process.stdout.write(`écrit  ${path.relative(cwd, reportPath)}\n`);
+  for (const r of rows) process.stdout.write(`  ${r[2] === 'identique' ? '✓' : '✗'} ${r[0]} — ${r[2]}\n`);
+  process.stdout.write('\nSuite (SKILL.md, réintégration) : 02-synthese-nouveautes.md, puis arbitrage.\n');
+}
+
 // ---------------------------------------------------------------- main
 
 const args = parseArgs(process.argv.slice(2));
@@ -354,6 +665,13 @@ switch (args.command) {
   case 'check':
     if (!args.sujet) usage('check exige un sujet');
     commandCheck(args);
+    break;
+  case 'diff':
+    if (!args.sujet) usage('diff exige un sujet');
+    commandDiff(args).catch((err) => {
+      process.stderr.write(`Erreur : ${err.message}\n`);
+      process.exit(1);
+    });
     break;
   case 'new':
     if (!args.sujet) usage('new exige un sujet');

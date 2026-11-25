@@ -19,6 +19,7 @@ exigences métier.
 
 Ce qui **modifie** la synthèse. Chaque entrée porte sa cible (la section
 visée), son contenu et sa conséquence (ce que ça change dans le skill).
+En réintégration, la cible est une **règle existante** du skill final.
 
 ### A1 — <titre de l'amendement>
 

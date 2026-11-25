@@ -10,7 +10,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -25,6 +25,20 @@ function tmpProject(t) {
 
 function run(cwd, args) {
   return spawnSync(process.execPath, [BIN, ...args], { cwd, encoding: 'utf8' });
+}
+
+// Version asynchrone : indispensable quand le test héberge lui-même un
+// serveur — spawnSync bloquerait la boucle d'événements du test et le
+// serveur ne pourrait jamais répondre au CLI (deadlock).
+function runAsync(cwd, args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, ...args], { cwd });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 function write(cwd, name, content) {
@@ -103,6 +117,24 @@ description: Un skill de test.
 # Skill test
 `;
 
+// Fiche avec une source figée (snapshot) pointant vers <ref>.
+const ficheFigee = (ref) => `sources:
+  - ref: ${ref}
+    langue: anglais
+    snapshot: sources/src-a/
+    date_fige: 2026-01-01
+    points_a_retenir:
+      - un point
+    ignorer:
+      - rien
+langue_cible: français
+`;
+
+// Lot minimal pour diff : copie figée sources/src-a/<fichier>.
+function lotFige(cwd, fichier, contenu) {
+  write(cwd, `threads/test/sources/src-a/${fichier}`, contenu);
+}
+
 function lotValide(cwd) {
   write(cwd, 'threads/test/00-fiche-sources.yaml', FICHE_MONO);
   write(cwd, 'threads/test/01-synthese-brute.md', BRUTE_TRACEE);
@@ -119,6 +151,8 @@ test('init crée les artefacts et ignore le répertoire de travail', (t) => {
   for (const f of ['00-fiche-sources.yaml', '02-reconciliation.md', '04-amendements.md', '05-skill-final.md']) {
     assert.ok(fs.existsSync(path.join(cwd, 'threads', 'mon-sujet', f)), `manquant : ${f}`);
   }
+  // Mémoire du lot : répertoire des copies figées (réintégration).
+  assert.ok(fs.existsSync(path.join(cwd, 'threads', 'mon-sujet', 'sources')));
   assert.match(fs.readFileSync(path.join(cwd, '.gitignore'), 'utf8'), /^threads\/$/m);
   // Le sujet est reporté dans les titres des gabarits.
   const reconciliation = fs.readFileSync(path.join(cwd, 'threads', 'mon-sujet', '02-reconciliation.md'), 'utf8');
@@ -211,4 +245,85 @@ test('new refuse d\'écraser un skill final rempli, sauf --force', (t) => {
   assert.match(r.stderr, /--force/);
   const r2 = run(cwd, ['new', 'test', '--force']);
   assert.strictEqual(r2.status, 0, r2.stderr);
+});
+
+// ---------------------------------------------------------------- diff
+
+test('check signale une source sans copie figée (avertissement)', (t) => {
+  const cwd = tmpProject(t);
+  lotValide(cwd); // FICHE_MONO ne porte pas de snapshot
+  const r = run(cwd, ['check', 'test']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /sans copie figée/);
+});
+
+test('diff signale une source identique', (t) => {
+  const cwd = tmpProject(t);
+  lotFige(cwd, 'SKILL.md', 'contenu\n');
+  const src = path.join(cwd, 'source-live');
+  write(cwd, 'source-live/SKILL.md', 'contenu\n');
+  write(cwd, 'threads/test/00-fiche-sources.yaml', ficheFigee(src));
+  const r = run(cwd, ['diff', 'test']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /identique/);
+});
+
+test('diff détecte les changements et produit un patch', (t) => {
+  const cwd = tmpProject(t);
+  lotFige(cwd, 'SKILL.md', 'ligne une\nligne deux\n');
+  write(cwd, 'source-live/SKILL.md', 'ligne une\nligne deux modifiée\n');
+  write(cwd, 'source-live/NOUVEAU.md', 'ajouté\n');
+  const src = path.join(cwd, 'source-live');
+  write(cwd, 'threads/test/00-fiche-sources.yaml', ficheFigee(src));
+  const r = run(cwd, ['diff', 'test']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /modifié \(1 modifié\(s\), 1 nouveau\(x\)\)/);
+  const cycles = fs.readdirSync(path.join(cwd, 'threads', 'test', 'reintegrations'));
+  assert.strictEqual(cycles.length, 1);
+  const cycle = path.join(cwd, 'threads', 'test', 'reintegrations', cycles[0]);
+  assert.ok(fs.existsSync(path.join(cycle, '01-etat-des-sources.md')));
+  const patch = fs.readFileSync(path.join(cycle, 'diff-src-a.patch'), 'utf8');
+  assert.match(patch, /-ligne deux\n\+ligne deux modifiée/);
+  assert.match(fs.readFileSync(path.join(cycle, '01-etat-des-sources.md'), 'utf8'), /NOUVEAU\.md/);
+});
+
+test('diff signale une source non résoluble, puis la compare via sources-actuelles', (t) => {
+  const cwd = tmpProject(t);
+  lotFige(cwd, 'SKILL.md', 'v1\n');
+  write(cwd, 'threads/test/00-fiche-sources.yaml', ficheFigee('mattpocock/skills — to-tickets (via mhrsdev)'));
+  const r = run(cwd, ['diff', 'test']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /à rafraîchir/);
+
+  // L'agent dépose le contenu actuel, puis relance.
+  write(cwd, 'threads/test/sources-actuelles/src-a/SKILL.md', 'v2\n');
+  const r2 = run(cwd, ['diff', 'test']);
+  assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
+  assert.match(r2.stdout, /modifié \(1 modifié\(s\)\)/);
+});
+
+test('diff --fetch compare une source http', async (t) => {
+  const cwd = tmpProject(t);
+  lotFige(cwd, 'contenu.txt', 'v1\n');
+  const server = require('node:http').createServer((req, res) => {
+    res.end('v2\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const url = `http://127.0.0.1:${server.address().port}/skill.txt`;
+  write(cwd, 'threads/test/00-fiche-sources.yaml', ficheFigee(url));
+  const r = await runAsync(cwd, ['diff', 'test', '--fetch']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /modifié \(1 modifié\(s\)\)/);
+});
+
+test('diff signale une source non figée', (t) => {
+  const cwd = tmpProject(t);
+  write(cwd, 'threads/test/00-fiche-sources.yaml', FICHE_MONO);
+  const r = run(cwd, ['diff', 'test']);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /non figée/);
 });

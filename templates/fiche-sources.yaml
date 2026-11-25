@@ -17,6 +17,11 @@
 sources:
   - ref: ""
     langue: ""
+    # Copie figée de la source dans sources/<id>/ (étape 1) : elle rend
+    # possible la réintégration quand la source bouge. date_fige : date
+    # de la copie (AAAA-MM-JJ).
+    snapshot: ""
+    date_fige: ""
     points_a_retenir:
       - ""
     ignorer:
