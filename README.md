@@ -44,6 +44,9 @@ skill-distiller/
 ├── README.md                  ce fichier
 ├── SKILL.md                   le workflow 5 étapes, générique, multi-agents
 ├── templates/                 modèles d'artefacts (étapes 1, 3, 4, 5)
+├── bin/
+│   └── skill-distiller        CLI Node.js sans dépendance (init/check/new)
+├── tests/                     tests de la CLI (node --test, sans dépendance)
 ├── src/
 │   └── skill-repositories.yaml  registre de découverte de sources
 ├── examples/
@@ -79,15 +82,30 @@ Aucune dépendance : ni OpenCode, ni boilersuit — le format cible est le
    langue, ton, répertoire de travail, traçabilité, structure du skill
    final.
 
-### CLI (à paraître)
+### CLI
 
-Trois commandes, Node.js sans dépendance (`node bin/skill-distiller …`) :
+Trois commandes, Node.js sans dépendance, à lancer **depuis la racine du
+projet cible** :
 
-- `init <sujet>` — crée `threads/<sujet>/` et pré-remplit les artefacts
-  depuis `templates/` ;
-- `check` — vérifie la traçabilité (chaque point tracé à une source,
-  amendements cohérents, étapes complètes) ;
-- `new` — génère l'ossature du skill final depuis la synthèse amendée.
+```
+node <chemin>/bin/skill-distiller init <sujet>    # [--dir <racine>]
+node <chemin>/bin/skill-distiller check <sujet>   # [--dir <racine>]
+node <chemin>/bin/skill-distiller new <sujet>     # [--force]
+```
+
+- `init <sujet>` — crée `threads/<sujet>/` (racine surchargeable par
+  `--dir`, ex. `--dir atelier`), pré-remplit les artefacts depuis
+  `templates/` et ajoute la racine au `.gitignore` du projet cible ;
+- `check <sujet>` — vérifie la traçabilité : étapes complètes (00/01/04/05,
+  plus 02/03 si plusieurs sources), chaque point de la synthèse tracé à
+  une source, amendements cohérents (cible/contenu/conséquence), skill
+  final rempli — code de sortie non nul si erreur ;
+- `new <sujet>` — génère l'ossature du skill final depuis la synthèse
+  amendée (déroulé dérivé des points tracés, note de sources depuis la
+  fiche) ; `--force` pour régénérer un `05-skill-final.md` déjà rempli.
+
+Les tests de la CLI se lancent avec `node --test tests/` (ou
+`npm test`).
 
 ## Positionnement
 
