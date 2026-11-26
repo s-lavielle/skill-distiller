@@ -62,8 +62,8 @@ skill-distiller/
 ├── tests/                     tests de la CLI et de la façade MCP
 │                              (unittest, sans dépendance)
 ├── src/
-│   ├── mcp_server.py          façade MCP : sert la CLI et le skill
-│   │                          aux agents (stdio ou HTTP)
+│   ├── mcp_server.py          façade MCP : sert la CLI, le skill et
+│   │                          les lots aux agents (stdio ou HTTP)
 │   └── skill-repositories.yaml  registre de découverte de sources
 ├── examples/
 │   └── tickets-gitlab/        cas réel complet (numérotation d'origine
@@ -117,8 +117,9 @@ python3 <chemin>/bin/skill-distiller diff <sujet>    # [--fetch]
 python3 <chemin>/bin/skill-distiller new <sujet>     # [--force]
 ```
 
-Une cinquième commande, `mcp`, sert ces commandes et le skill aux
-agents compatibles : voir [« Façade MCP »](#fa%C3%A7ade-mcp-pour-les-agents).
+Une cinquième commande, `mcp`, sert ces commandes, le skill et le
+contenu des lots aux agents compatibles : voir
+[« Façade MCP »](#fa%C3%A7ade-mcp-pour-les-agents).
 
 (Le script porte un shebang : `./bin/skill-distiller …` marche aussi.)
 
@@ -190,17 +191,27 @@ docker compose exec skill-distiller python3 -m unittest discover -s /opt/skill-d
 
 Le produit reste un outil autonome (la CLI ci-dessus) ; la façade MCP en
 est la **prise standard** qui le rend branchable par n'importe quel
-agent compatible (Claude Code, VS Code, Codex…). Elle sert les deux
+agent compatible (Claude Code, VS Code, Codex…). Elle sert les trois
 facettes du produit par le même connecteur :
 
-- **outils** : `skill_distiller_init`, `skill_distiller_check`,
-  `skill_distiller_diff`, `skill_distiller_new` — mêmes sémantiques que
-  les commandes CLI (chaque appel exécute la commande, pas de logique
-  dupliquée) ;
+- **outils de commande** : `skill_distiller_init`, `_check`, `_diff`,
+  `_new` — mêmes sémantiques que les commandes CLI (chaque appel exécute
+  la commande, pas de logique dupliquée) ;
+- **outils de contenu** : `skill_distiller_state` (inventaire du lot),
+  `_read` (récupérer un artefact ou une source), `_write` (**rendre un
+  résultat**) — le lot se consulte et se rend entièrement par le MCP ;
 - **skill** : `SKILL.md` + `templates/` servis au format Agent Skills
   (extension MCP Skills, `skill://skill-distiller/…`), avec leurs
   digests SHA-256 — le workflow est distribué par l'outil lui-même,
   versionné avec lui.
+
+Pour `write`, l'agent ne choisit pas de chemin : il **étiquette** son
+résultat, et c'est skill-distiller qui le range au bon endroit du lot —
+`fiche`, `synthese-brute`, `reconciliation`, `synthese-reconciliee`,
+`amendements`, `skill-final`, `source:<id>/<fichier>`,
+`source-actuelle:<id>/<fichier>`, `cycle:<date>:<artefact>`. Les
+équivalences vers les fichiers (`00-fiche-sources.yaml`, `sources/<id>/`,
+`reintegrations/<date>/`…) sont l'affaire de l'outil.
 
 Deux transports :
 
@@ -222,13 +233,22 @@ python3 <chemin>/bin/skill-distiller mcp --http 0.0.0.0:8080  # URL
   #   http://skill-distiller-mcp:8080/mcp
   ```
 
-Garde-fous : quatre outils fixes (jamais de commande libre), paramètres
+**Mode nominal — « pur MCP »** : l'agent hôte n'a besoin d'aucun accès
+disque. Il charge le skill, consulte le lot (`state`, `read`), fait le
+travail selon le workflow, puis rend chaque résultat (`write`) : « voilà
+la synthèse du lot X, range-la chez toi ». Tout reste chez
+skill-distiller — un agent peut disparaître en cours de lot, une autre
+session reprend sans rien d'autre que le MCP. L'agent peut conserver des
+copies chez lui s'il le souhaite, mais rien n'en dépend.
+
+Garde-fous : sept outils fixes (jamais de commande libre), paramètres
 validés (sujet en slug, `dir` sur un seul segment, `project` limité à un
-répertoire existant), ressources du skill servies depuis une liste
-fermée (aucun échappement de chemin). Le projet cible est celui monté
-en `/work` (ou précisé par l'outil, paramètre `project`). Un code de
-sortie non nul de la CLI est rendu en `isError` — par exemple `check`
-avec des erreurs restantes.
+répertoire existant), **écriture de contenu confinée au lot** (références
+validées, aucun échappement de chemin, plafond de 512 KiB par contenu),
+ressources du skill servies depuis une liste fermée. Le projet cible est
+celui monté en `/work` (ou précisé par l'outil, paramètre `project`).
+Un code de sortie non nul de la CLI est rendu en `isError` — par exemple
+`check` avec des erreurs restantes.
 
 ⚠️ L'endpoint n'embarque **pas** d'authentification : restez sur un
 réseau de confiance (le réseau interne du compose). Une exposition
