@@ -39,6 +39,22 @@ Le skill final les fusionne — sans jamais mélanger les deux en silence.
 - **Justifier** chaque règle non évidente : le pourquoi, pas seulement le
   quoi.
 
+## Exécution des commandes
+
+Les commandes de la CLI (`init`, `check`, `diff`, `new`) s'exécutent de
+trois façons, dans cet ordre de préférence :
+
+1. **outils MCP** `skill_distiller_*` quand l'environnement de l'agent y
+   est connecté — le serveur de skill-distiller les expose, en même
+   temps que ce skill ;
+2. **CLI directe** : `python3 <chemin>/bin/skill-distiller <commande>
+   <sujet>`, depuis la racine du projet cible ;
+3. **Docker** : `docker compose exec skill-distiller skill-distiller
+   <commande> <sujet>` (voir le README).
+
+Quelle que soit la voie, la commande agit **sur le projet cible** : les
+artefacts y sont écrits, jamais dans le dépôt de skill-distiller.
+
 ## Artefacts
 
 Répertoire de travail : `threads/<sujet>/`, à la racine du projet cible.

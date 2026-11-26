@@ -53,14 +53,17 @@ skill-distiller/
 ├── SKILL.md                   le workflow 5 étapes, générique, multi-agents
 ├── Dockerfile                 image de la CLI (Python 3, git, curl)
 ├── docker-compose.yml         service pour lancer la CLI sur un projet
-│                              cible monté en volume
+│                              cible monté en volume, service MCP
 ├── .dockerignore
 ├── templates/                 modèles d'artefacts (étapes 1, 3, 4, 5)
 ├── bin/
 │   └── skill-distiller        CLI Python 3 sans dépendance
-│                              (init/check/diff/new)
-├── tests/                     tests de la CLI (unittest, sans dépendance)
+│                              (init/check/diff/new, mcp)
+├── tests/                     tests de la CLI et de la façade MCP
+│                              (unittest, sans dépendance)
 ├── src/
+│   ├── mcp_server.py          façade MCP : sert la CLI et le skill
+│   │                          aux agents (stdio ou HTTP)
 │   └── skill-repositories.yaml  registre de découverte de sources
 ├── examples/
 │   └── tickets-gitlab/        cas réel complet (numérotation d'origine
@@ -103,8 +106,9 @@ Aucune dépendance : ni OpenCode, ni boilersuit — le format cible est le
 
 ### CLI
 
-Quatre commandes, **Python 3 (≥ 3.9) sans dépendance** (bibliothèque
-standard seule), à lancer **depuis la racine du projet cible** :
+Quatre commandes de workflow, **Python 3 (≥ 3.9) sans dépendance**
+(bibliothèque standard seule), à lancer **depuis la racine du projet
+cible** :
 
 ```
 python3 <chemin>/bin/skill-distiller init <sujet>    # [--dir <racine>]
@@ -112,6 +116,9 @@ python3 <chemin>/bin/skill-distiller check <sujet>   # [--dir <racine>]
 python3 <chemin>/bin/skill-distiller diff <sujet>    # [--fetch]
 python3 <chemin>/bin/skill-distiller new <sujet>     # [--force]
 ```
+
+Une cinquième commande, `mcp`, sert ces commandes et le skill aux
+agents compatibles : voir [« Façade MCP »](#fa%C3%A7ade-mcp-pour-les-agents).
 
 (Le script porte un shebang : `./bin/skill-distiller …` marche aussi.)
 
@@ -178,6 +185,54 @@ Les tests de la CLI se lancent dans le conteneur :
 ```
 docker compose exec skill-distiller python3 -m unittest discover -s /opt/skill-distiller/tests
 ```
+
+### Façade MCP (pour les agents)
+
+Le produit reste un outil autonome (la CLI ci-dessus) ; la façade MCP en
+est la **prise standard** qui le rend branchable par n'importe quel
+agent compatible (Claude Code, VS Code, Codex…). Elle sert les deux
+facettes du produit par le même connecteur :
+
+- **outils** : `skill_distiller_init`, `skill_distiller_check`,
+  `skill_distiller_diff`, `skill_distiller_new` — mêmes sémantiques que
+  les commandes CLI (chaque appel exécute la commande, pas de logique
+  dupliquée) ;
+- **skill** : `SKILL.md` + `templates/` servis au format Agent Skills
+  (extension MCP Skills, `skill://skill-distiller/…`), avec leurs
+  digests SHA-256 — le workflow est distribué par l'outil lui-même,
+  versionné avec lui.
+
+Deux transports :
+
+```
+python3 <chemin>/bin/skill-distiller mcp                      # stdio
+python3 <chemin>/bin/skill-distiller mcp --http 0.0.0.0:8080  # URL
+```
+
+- **stdio** : l'agent lance la commande lui-même (l'outil est installé
+  là où l'agent tourne) — pas de serveur, pas de réseau ;
+- **HTTP streamable** : le conteneur expose une URL pour les agents qui
+  ne peuvent rien lancer. Avec le compose, le service
+  `skill-distiller-mcp` partage `/work` (le projet cible) et se joint
+  depuis un autre conteneur du réseau :
+
+  ```
+  docker compose up -d skill-distiller-mcp
+  # depuis le conteneur du projet cible :
+  #   http://skill-distiller-mcp:8080/mcp
+  ```
+
+Garde-fous : quatre outils fixes (jamais de commande libre), paramètres
+validés (sujet en slug, `dir` sur un seul segment, `project` limité à un
+répertoire existant), ressources du skill servies depuis une liste
+fermée (aucun échappement de chemin). Le projet cible est celui monté
+en `/work` (ou précisé par l'outil, paramètre `project`). Un code de
+sortie non nul de la CLI est rendu en `isError` — par exemple `check`
+avec des erreurs restantes.
+
+⚠️ L'endpoint n'embarque **pas** d'authentification : restez sur un
+réseau de confiance (le réseau interne du compose). Une exposition
+publique exige une couche d'authentification en amont.
 
 ## Positionnement
 
