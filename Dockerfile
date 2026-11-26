@@ -15,9 +15,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
 
-# La CLI ne lit que bin/ et templates/ (ROOT = parent de bin), mais le
+# La CLI ne lit que bin/ et templates/ (ROOT = parent de bin) ; la
+# façade MCP (src/) y ajoute SKILL.md, qu'elle sert comme skill. Le
 # dépôt complet reste utile dans l'image : tests/ pour les lancer dans
-# le conteneur, docs/ et SKILL.md pour la procédure de distillation.
+# le conteneur, docs/ pour la méthode.
 COPY . /opt/skill-distiller
 
 # Raccourci dans le PATH : les commandes `docker compose exec` restent

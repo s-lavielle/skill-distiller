@@ -18,3 +18,14 @@ services:
     entrypoint: ["sleep", "infinity"]
     volumes:
       - ${TARGET_PROJECT:-.}:/work
+
+  # Façade MCP : sert les outils init/check/diff/new et le skill
+  # skill-distiller aux agents compatibles. URL joignable depuis un
+  # conteneur du même réseau : http://skill-distiller-mcp:8080/mcp.
+  # Même volume /work : la CLI agit sur le projet cible, comme `exec`.
+  skill-distiller-mcp:
+    build: .
+    image: skill-distiller
+    command: ["mcp", "--http", "0.0.0.0:8080"]
+    volumes:
+      - ${TARGET_PROJECT:-.}:/work
