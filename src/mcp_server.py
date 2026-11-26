@@ -166,6 +166,19 @@ TOOL_COMMANDS = {
     "skill_distiller_new": ("new", ["force"]),
 }
 
+LOT_TOOLS = {
+    "skill_distiller_state",
+    "skill_distiller_read",
+    "skill_distiller_write",
+}
+
+REF_DESCRIPTION = (
+    "référence sémantique : fiche, synthese-brute, reconciliation, "
+    "synthese-reconciliee, amendements, skill-final, "
+    "source:<id>/<fichier>, source-actuelle:<id>/<fichier>, "
+    "cycle:<date>:<artefact>, cycle:<date>/<fichier>"
+)
+
 _COMMON_PROPERTIES = {
     "sujet": {
         "type": "string",
@@ -225,6 +238,27 @@ TOOLS = [
         extra={"force": {"type": "boolean",
                          "description": "écraser un 05-skill-final.md déjà rempli (défaut : non)"}},
     ),
+    _tool(
+        "skill_distiller_state",
+        "Inventaire du lot : artefacts présents ou absents, sources figées, cycles de "
+        "réintégration. À appeler en début de reprise pour savoir où en est le travail.",
+    ),
+    _tool(
+        "skill_distiller_read",
+        "Rend le contenu d'un élément du lot (mode « pur MCP » : rien n'est stocké côté "
+        "agent). " + REF_DESCRIPTION + ".",
+        extra={"ref": {"type": "string", "description": REF_DESCRIPTION}},
+    ),
+    _tool(
+        "skill_distiller_write",
+        "Range un résultat dans le lot : l'agent donne l'étiquette du résultat "
+        "(références de skill_distiller_read), c'est skill-distiller qui le place au bon "
+        "endroit. Le lot doit exister (skill_distiller_init).",
+        extra={
+            "ref": {"type": "string", "description": REF_DESCRIPTION},
+            "content": {"type": "string", "description": "contenu textuel du résultat"},
+        },
+    ),
 ]
 
 
@@ -282,6 +316,164 @@ def run_tool(name, args):
         text = f"{subcommand} : sortie vide (code {proc.returncode})"
     return {"content": [{"type": "text", "text": text}],
             "isError": proc.returncode != 0}
+
+
+# --------------------------------------------------------------- le lot
+#
+# Les contenus du lot passent aussi par le MCP (mode « pur MCP ») :
+# l'agent rend des résultats ÉTIQUETÉS et c'est l'outil qui les range —
+# les références disent ce que c'est, jamais où le mettre. Le plan de
+# rangement est celui de la CLI (cf. FILES dans bin/skill-distiller) ;
+# la cohérence entre les deux est protégée par un test.
+
+ARTIFACT_REFS = {
+    "fiche": "00-fiche-sources.yaml",
+    "synthese-brute": "01-synthese-brute.md",
+    "reconciliation": "02-reconciliation.md",
+    "synthese-reconciliee": "03-synthese-reconciliee.md",
+    "amendements": "04-amendements.md",
+    "skill-final": "05-skill-final.md",
+}
+
+CYCLE_REFS = {
+    "etat-des-sources": "01-etat-des-sources.md",
+    "synthese-nouveautes": "02-synthese-nouveautes.md",
+    "amendements": "03-amendements.md",
+    "skill-final": "04-skill-final.md",
+}
+
+SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAX_CONTENT = 512 * 1024  # plafond de taille d'un contenu lu ou rendu
+
+
+def _safe_rel_path(path):
+    """Chemin relatif à segments validés (pas de `..`, pas d'absolu) ;
+    None sinon."""
+    segments = path.split("/")
+    if segments and all(SEGMENT_RE.match(s) for s in segments):
+        return "/".join(segments)
+    return None
+
+
+def resolve_ref(ref):
+    """Référence sémantique → chemin relatif dans le lot ; None si inconnue."""
+    if not isinstance(ref, str):
+        return None
+    if ref in ARTIFACT_REFS:
+        return ARTIFACT_REFS[ref]
+    m = re.match(r"^source(-actuelle)?:([A-Za-z0-9][A-Za-z0-9._-]*)/(.+)$", ref)
+    if m:
+        rel = _safe_rel_path(m.group(3))
+        base = "sources-actuelles" if m.group(1) else "sources"
+        return f"{base}/{m.group(2)}/{rel}" if rel else None
+    m = re.match(r"^cycle:([A-Za-z0-9][A-Za-z0-9._-]*):([A-Za-z0-9][A-Za-z0-9._-]*)$", ref)
+    if m:
+        rel = CYCLE_REFS.get(m.group(2))
+        return f"reintegrations/{m.group(1)}/{rel}" if rel else None
+    m = re.match(r"^cycle:([A-Za-z0-9][A-Za-z0-9._-]*)/(.+)$", ref)
+    if m:
+        rel = _safe_rel_path(m.group(2))
+        return f"reintegrations/{m.group(1)}/{rel}" if rel else None
+    return None
+
+
+def _lot_root(args):
+    """Racine du lot (project/dir/sujet) validée ; (racine, None) ou (None, erreur)."""
+    sujet = args.get("sujet")
+    if not isinstance(sujet, str) or not SUJET_RE.match(sujet):
+        return None, _tool_error(f"paramètre « sujet » invalide : {sujet!r} "
+                                 "(attendu : slug, ex. mon-sujet)")
+    dir_arg = args.get("dir", "threads")
+    if not isinstance(dir_arg, str) or not DIR_RE.match(dir_arg):
+        return None, _tool_error(f"paramètre « dir » invalide : {dir_arg!r} "
+                                 "(attendu : un seul segment, ex. atelier)")
+    project = args.get("project", str(Path.cwd()))
+    if not isinstance(project, str):
+        return None, _tool_error("paramètre « project » invalide : chemin attendu")
+    project_path = Path(project)
+    if not project_path.is_dir():
+        return None, _tool_error(f"projet cible introuvable : {project}")
+    lot_root = project_path / dir_arg / sujet
+    if not lot_root.is_dir():
+        return None, _tool_error(f"lot introuvable : {lot_root} — "
+                                 "lancer d'abord skill_distiller_init")
+    return (lot_root.resolve(), None)
+
+
+def _lot_target(lot_root, ref):
+    """Référence → chemin dans le lot, avec vérification d'appartenance."""
+    rel = resolve_ref(ref)
+    if rel is None:
+        return None, None, _tool_error(
+            f"référence inconnue : {ref!r} (attendu : {REF_DESCRIPTION})")
+    target = lot_root / rel
+    # Défense en profondeur : les segments sont déjà validés.
+    if not target.resolve().is_relative_to(lot_root):
+        return None, None, _tool_error(f"référence hors lot : {ref!r}")
+    return target, rel, None
+
+
+def run_lot_tool(name, args):
+    """state / read / write : le contenu du lot, entièrement par MCP."""
+    if not isinstance(args, dict):
+        return _tool_error("arguments invalides : objet attendu")
+    lot_root, error = _lot_root(args)
+    if error:
+        return error
+    ref = args.get("ref")
+
+    if name == "skill_distiller_state":
+        return _tool_ok(_lot_state_text(lot_root))
+
+    target, rel, error = _lot_target(lot_root, ref)
+    if error:
+        return error
+
+    if name == "skill_distiller_read":
+        if not target.is_file():
+            return _tool_error(f"contenu introuvable : {ref}")
+        size = target.stat().st_size
+        if size > MAX_CONTENT:
+            return _tool_error(f"{ref} trop volumineux ({size} o > {MAX_CONTENT} o)")
+        return _tool_ok(target.read_text(encoding="utf-8", errors="replace"))
+
+    # skill_distiller_write
+    content = args.get("content")
+    if not isinstance(content, str):
+        return _tool_error("paramètre « content » invalide : texte attendu")
+    size = len(content.encode("utf-8"))
+    if size > MAX_CONTENT:
+        return _tool_error(f"contenu trop volumineux ({size} o > {MAX_CONTENT} o)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return _tool_ok(f"rangé {ref} → {rel} ({size} o)")
+
+
+def _lot_state_text(lot_root):
+    """Inventaire du lot : artefacts, sources, cycles — pour qu'un agent
+    reprenne un travail sans rien savoir de l'état du disque."""
+    lines = ["Artefacts :"]
+    for ref, rel in ARTIFACT_REFS.items():
+        path = lot_root / rel
+        if path.is_file():
+            lines.append(f"  ✓ {rel} ({ref}, {path.stat().st_size} o)")
+        else:
+            lines.append(f"  ✗ {rel} ({ref}, absent)")
+    for base, label in (("sources", "Sources figées"),
+                        ("sources-actuelles", "Sources actuelles"),
+                        ("reintegrations", "Cycles de réintégration")):
+        directory = lot_root / base
+        entries = []
+        if directory.is_dir():
+            for child in sorted(directory.iterdir()):
+                count = sum(1 for p in child.rglob("*") if p.is_file())
+                entries.append(f"{child.name} ({count} fichier(s))")
+        lines.append(f"{label} : " + (", ".join(entries) if entries else "—"))
+    return "\n".join(lines)
+
+
+def _tool_ok(text):
+    return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
 def _tool_error(message):
@@ -355,16 +547,22 @@ class McpProcessor:
                 "Le workflow complet (5 étapes, validations humaines) est servi comme "
                 "skill (skills/list, skill://skill-distiller/SKILL.md) ; lisez-le avant "
                 "d'agir. Les commandes sont les outils skill_distiller_init/check/"
-                "diff/new, exécutées depuis la racine du projet cible (paramètre "
-                "project, ou répertoire de travail du serveur)."
+                "diff/new ; les contenus du lot se consultent avec "
+                "skill_distiller_state/read et se RENDENT avec skill_distiller_write "
+                "(références sémantiques : fiche, synthese-brute, source:<id>/…, "
+                "cycle:<date>:…) — c'est skill-distiller qui range. Mode « pur MCP » : "
+                "rien n'est stocké côté agent, le lot est la mémoire de l'outil."
             ),
         }
 
     def _tools_call(self, params):
         name = params.get("name")
-        if name not in TOOL_COMMANDS:
-            raise RpcError(INVALID_PARAMS, f"outil inconnu : {name}")
-        return run_tool(name, params.get("arguments") or {})
+        args = params.get("arguments") or {}
+        if name in TOOL_COMMANDS:
+            return run_tool(name, args)
+        if name in LOT_TOOLS:
+            return run_lot_tool(name, args)
+        raise RpcError(INVALID_PARAMS, f"outil inconnu : {name}")
 
     def _skills_get(self, params):
         uri = params.get("uri")

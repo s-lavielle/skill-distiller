@@ -3,13 +3,18 @@
 Pourquoi cette suite : elle protège le contrat vu par les agents — le
 handshake (un client doit pouvoir se brancher), le skill servi avec ses
 digests SHA-256 (c'est ce qui rend le workflow distribuable et vérifiable
-— l'« auditable » du produit s'y joue), et le confinement des appels :
-quatre outils, paramètres validés, aucun échappement de chemin dans les
-ressources. Une régression ici rendrait l'outil inutilisable — ou
-dangereux — depuis un contexte agentique.
+— l'« auditable » du produit s'y joue), les outils de contenu du lot
+(mode « pur MCP » : l'agent rend des résultats étiquetés, l'outil range)
+et le confinement des appels : paramètres validés, aucun échappement de
+chemin. Le test test_lot_entier_rendu_puis_check_vert est l'acceptation
+du mode « pur MCP » : un lot complet rendu par les outils doit passer le
+contrôle de traçabilité. Une régression ici rendrait l'outil inutilisable
+— ou dangereux — depuis un contexte agentique.
 """
 
 import http.server
+import importlib.machinery
+import importlib.util
 import json
 import re
 import shutil
@@ -27,6 +32,52 @@ sys.path.insert(0, str(ROOT / "src"))
 import mcp_server  # noqa: E402  (chemin ajouté ci-dessus)
 
 SKILL_URI = "skill://skill-distiller/SKILL.md"
+
+# Fixtures d'un lot minimal valide (source unique, points tracés) — le
+# test clé du « pur MCP » les rend entièrement par les outils de contenu.
+FICHE = """sources:
+  - ref: src-a
+    langue: anglais
+    snapshot: sources/src-a/
+    date_fige: 2026-11-26
+    points_a_retenir:
+      - un point
+    ignorer:
+      - rien
+langue_cible: français
+"""
+
+BRUTE = """# Synthèse brute — test
+
+## 1. Règle une [A]
+
+Contenu.
+"""
+
+AMENDEMENTS = """# Amendements
+
+## Ajouts
+
+Rien.
+
+## Amendements
+
+Aucune.
+
+## Cadre
+
+Français.
+"""
+
+FINAL = """---
+name: skill-test
+description: Un skill de test pour la suite MCP.
+---
+
+# Skill test
+
+Contenu.
+"""
 
 
 class StdioClient:
@@ -83,6 +134,16 @@ class McpStdioTestCase(unittest.TestCase):
             "tools/call", {"name": name, "arguments": arguments})
         return response["result"]
 
+    def init_lot(self, sujet="mon-sujet"):
+        return self.call_tool(
+            "skill_distiller_init", {"sujet": sujet, "project": str(self.dir)})
+
+    def lot_write(self, ref, content, sujet="mon-sujet"):
+        return self.call_tool(
+            "skill_distiller_write",
+            {"sujet": sujet, "project": str(self.dir),
+             "ref": ref, "content": content})
+
     # handshake -------------------------------------------------------
 
     def test_initialize_negocie_le_protocole_et_declare_le_skill(self):
@@ -113,12 +174,14 @@ class McpStdioTestCase(unittest.TestCase):
 
     # outils ----------------------------------------------------------
 
-    def test_tools_list_expose_les_quatre_commandes(self):
+    def test_tools_list_expose_commandes_et_contenu_du_lot(self):
         response = self.client.request("tools/list")
         tools = {t["name"]: t for t in response["result"]["tools"]}
         self.assertEqual(set(tools), {
             "skill_distiller_init", "skill_distiller_check",
-            "skill_distiller_diff", "skill_distiller_new"})
+            "skill_distiller_diff", "skill_distiller_new",
+            "skill_distiller_state", "skill_distiller_read",
+            "skill_distiller_write"})
         for tool in tools.values():
             self.assertIn("sujet", tool["inputSchema"]["properties"])
 
@@ -150,6 +213,76 @@ class McpStdioTestCase(unittest.TestCase):
         response = self.client.request(
             "tools/call", {"name": "outil-inconnu", "arguments": {}})
         self.assertEqual(response["error"]["code"], -32602)
+
+    # contenu du lot ---------------------------------------------------
+
+    def test_lot_write_range_au_bon_endroit_et_read_le_rend(self):
+        self.init_lot()
+        content = "ma fiche\n"
+        result = self.lot_write("fiche", content)
+        self.assertFalse(result["isError"])
+        self.assertEqual(
+            (self.dir / "threads/mon-sujet/00-fiche-sources.yaml").read_text(
+                encoding="utf-8"),
+            content)
+
+        result = self.call_tool(
+            "skill_distiller_read",
+            {"sujet": "mon-sujet", "project": str(self.dir), "ref": "fiche"})
+        self.assertEqual(result["content"][0]["text"], content)
+
+        # Sources et cycles : l'agent étiquette, l'outil organise.
+        self.assertFalse(self.lot_write("source:src-a/texte.md", "une source\n")["isError"])
+        self.assertTrue(
+            (self.dir / "threads/mon-sujet/sources/src-a/texte.md").exists())
+        self.assertFalse(self.lot_write(
+            "cycle:2026-01-02-1530:synthese-nouveautes", "nouveautés\n")["isError"])
+        self.assertTrue((self.dir / "threads/mon-sujet/reintegrations/"
+                         "2026-01-02-1530/02-synthese-nouveautes.md").exists())
+
+    def test_lot_state_inventorie_le_lot(self):
+        self.init_lot()
+        self.lot_write("fiche", FICHE)
+        result = self.call_tool(
+            "skill_distiller_state",
+            {"sujet": "mon-sujet", "project": str(self.dir)})
+        text = result["content"][0]["text"]
+        self.assertIn("00-fiche-sources.yaml (fiche", text)
+        self.assertIn("01-synthese-brute.md (synthese-brute, absent)", text)
+        self.assertIn("Sources figées : —", text)
+
+    def test_lot_refuse_references_inconnues_et_echappements(self):
+        self.init_lot()
+        for ref in ("inconnu", "source:../x/f.md", "source:src-a/../../etc/passwd",
+                    "cycle:2026-01-01:machin", "/etc/passwd", "fiche/../../../etc"):
+            result = self.lot_write(ref, "x")
+            self.assertTrue(result["isError"], ref)
+
+        # Le lot doit exister avant toute consultation ou tout dépôt.
+        result = self.call_tool(
+            "skill_distiller_read",
+            {"sujet": "absent", "project": str(self.dir), "ref": "fiche"})
+        self.assertTrue(result["isError"])
+
+    def test_lot_entier_rendu_puis_check_vert(self):
+        """Acceptation du « pur MCP » : un lot complet est rendu par les
+        outils de contenu — jamais d'écriture côté agent — et le contrôle
+        de traçabilité passe au vert."""
+        self.init_lot()
+        for ref, content in (
+            ("fiche", FICHE),
+            ("source:src-a/texte.md", "Le texte de la source A.\n"),
+            ("synthese-brute", BRUTE),
+            ("amendements", AMENDEMENTS),
+            ("skill-final", FINAL),
+        ):
+            result = self.lot_write(ref, content)
+            self.assertFalse(result["isError"], ref)
+        result = self.call_tool(
+            "skill_distiller_check",
+            {"sujet": "mon-sujet", "project": str(self.dir)})
+        self.assertFalse(result["isError"])
+        self.assertIn("0 erreur(s)", result["content"][0]["text"])
 
     # skill -----------------------------------------------------------
 
@@ -258,6 +391,29 @@ class McpHttpTestCase(unittest.TestCase):
         status, _, _ = self.post(
             {"jsonrpc": "2.0", "id": 3, "method": "ping"}, session="inconnue")
         self.assertEqual(status, 404)
+
+
+class RangementTestCase(unittest.TestCase):
+    """Le plan de rangement des références doit suivre celui de la CLI.
+
+    L'outil « organise chez lui » : si les deux plans diverent, un lot
+    rendu par MCP ne serait plus lisible par `check` ni par la CLI.
+    """
+
+    def test_artifact_refs_suivent_files_de_la_cli(self):
+        loader = importlib.machinery.SourceFileLoader("skill_distiller_cli", BIN)
+        spec = importlib.util.spec_from_file_location(
+            "skill_distiller_cli", BIN, loader=loader)
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        self.assertEqual(mcp_server.ARTIFACT_REFS, {
+            "fiche": cli.FILES["fiche"],
+            "synthese-brute": cli.FILES["brute"],
+            "reconciliation": cli.FILES["reconciliation"],
+            "synthese-reconciliee": cli.FILES["reconciliee"],
+            "amendements": cli.FILES["amendements"],
+            "skill-final": cli.FILES["final"],
+        })
 
 
 if __name__ == "__main__":
