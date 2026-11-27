@@ -15,14 +15,24 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl \
     && rm -rf /var/lib/apt/lists/*
 
-# La CLI ne lit que bin/ et templates/ (ROOT = parent de bin), mais le
+# La CLI ne lit que bin/ et templates/ (ROOT = parent de bin) ; la
+# façade MCP (src/) y ajoute SKILL.md, qu'elle sert comme skill. Le
 # dépôt complet reste utile dans l'image : tests/ pour les lancer dans
-# le conteneur, docs/ et SKILL.md pour la procédure de distillation.
+# le conteneur, docs/ pour la méthode.
 COPY . /opt/skill-distiller
+
+# Raccourci dans le PATH : les commandes `docker compose exec` restent
+# courtes (`skill-distiller init <sujet>`). Path.resolve() du script
+# remonte le lien vers /opt/skill-distiller : ROOT et templates/ sont
+# trouvés au bon endroit.
+RUN ln -s /opt/skill-distiller/bin/skill-distiller /usr/local/bin/skill-distiller
 
 # Les commandes s'exécutent depuis la racine du projet cible : c'est le
 # répertoire de travail par défaut du conteneur (/work, monté en volume).
 WORKDIR /work
 
-ENTRYPOINT ["python3", "/opt/skill-distiller/bin/skill-distiller"]
+# Entrypoint CLI : `docker run` s'utilise en usage ponctuel. Le compose
+# le surcharge (sleep infinity) pour le modèle conteneur longue durée +
+# exec.
+ENTRYPOINT ["skill-distiller"]
 CMD ["--help"]

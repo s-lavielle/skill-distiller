@@ -6,6 +6,11 @@ racine du PROJET CIBLE :
 
     python3 <chemin>/bin/skill-distiller <init|check|diff|new> <sujet>
 
+La façade MCP (src/mcp_server.py) sert les mêmes commandes et le skill
+aux agents compatibles :
+
+    python3 <chemin>/bin/skill-distiller mcp [--http HOST:PORT]
+
 Artefacts dans <racine>/<sujet>/ (racine par défaut : threads/,
 surcharge par --dir — voir SKILL.md, section « Artefacts »).
 """
@@ -598,6 +603,18 @@ def command_new(args):
     print("À compléter, puis relancer `check`.")
 
 
+# ----------------------------------------------------------------- mcp
+
+def command_mcp(args):
+    """Démarre la façade MCP (src/mcp_server.py) — agents compatibles."""
+    sys.path.insert(0, str(ROOT / "src"))
+    import mcp_server
+    try:
+        mcp_server.serve(args.http)
+    except mcp_server.RpcError as exc:
+        usage_error(exc.message)
+
+
 # ---------------------------------------------------------------- main
 
 def build_parser():
@@ -627,6 +644,13 @@ def build_parser():
     common(p_new)
     p_new.add_argument("--force", action="store_true",
                        help="écraser un 05-skill-final.md déjà rempli")
+
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="sert la CLI et le skill en MCP (stdio par défaut, HTTP avec --http)",
+    )
+    p_mcp.add_argument("--http", metavar="HOST:PORT", default=None,
+                       help="transport HTTP streamable (défaut : stdio)")
     return parser
 
 
@@ -640,6 +664,8 @@ def main():
         command_diff(args)
     elif args.command == "new":
         command_new(args)
+    elif args.command == "mcp":
+        command_mcp(args)
 
 
 if __name__ == "__main__":

@@ -53,14 +53,17 @@ skill-distiller/
 ├── SKILL.md                   le workflow 5 étapes, générique, multi-agents
 ├── Dockerfile                 image de la CLI (Python 3, git, curl)
 ├── docker-compose.yml         service pour lancer la CLI sur un projet
-│                              cible monté en volume
+│                              cible monté en volume, service MCP
 ├── .dockerignore
 ├── templates/                 modèles d'artefacts (étapes 1, 3, 4, 5)
 ├── bin/
 │   └── skill-distiller        CLI Python 3 sans dépendance
-│                              (init/check/diff/new)
-├── tests/                     tests de la CLI (unittest, sans dépendance)
+│                              (init/check/diff/new, mcp)
+├── tests/                     tests de la CLI et de la façade MCP
+│                              (unittest, sans dépendance)
 ├── src/
+│   ├── mcp_server.py          façade MCP : sert la CLI, le skill et
+│   │                          les lots aux agents (stdio ou HTTP)
 │   └── skill-repositories.yaml  registre de découverte de sources
 ├── examples/
 │   └── tickets-gitlab/        cas réel complet (numérotation d'origine
@@ -103,8 +106,9 @@ Aucune dépendance : ni OpenCode, ni boilersuit — le format cible est le
 
 ### CLI
 
-Quatre commandes, **Python 3 (≥ 3.9) sans dépendance** (bibliothèque
-standard seule), à lancer **depuis la racine du projet cible** :
+Quatre commandes de workflow, **Python 3 (≥ 3.9) sans dépendance**
+(bibliothèque standard seule), à lancer **depuis la racine du projet
+cible** :
 
 ```
 python3 <chemin>/bin/skill-distiller init <sujet>    # [--dir <racine>]
@@ -112,6 +116,10 @@ python3 <chemin>/bin/skill-distiller check <sujet>   # [--dir <racine>]
 python3 <chemin>/bin/skill-distiller diff <sujet>    # [--fetch]
 python3 <chemin>/bin/skill-distiller new <sujet>     # [--force]
 ```
+
+Une cinquième commande, `mcp`, sert ces commandes, le skill et le
+contenu des lots aux agents compatibles : voir
+[« Façade MCP »](#fa%C3%A7ade-mcp-pour-les-agents).
 
 (Le script porte un shebang : `./bin/skill-distiller …` marche aussi.)
 
@@ -147,22 +155,27 @@ Construire l'image :
 docker build -t skill-distiller .
 ```
 
-Lancer une commande : le projet cible est monté en `/work`, qui est le
-répertoire de travail du conteneur (donc la racine attendue par la CLI) :
+**Modèle compose — conteneur longue durée** : le service reste en vie, la
+CLI s'exécute par `exec` sans recréer de conteneur à chaque commande. Le
+projet cible est monté en `/work`, répertoire de travail du conteneur
+(donc la racine attendue par la CLI) :
 
 ```
-docker compose run --rm skill-distiller init <sujet>
+docker compose up -d
+docker compose exec skill-distiller skill-distiller init <sujet>
+docker compose exec skill-distiller skill-distiller check <sujet>
+docker compose down
 ```
 
 Le projet cible se précise avec la variable `TARGET_PROJECT` (défaut : le
 répertoire courant) :
 
 ```
-TARGET_PROJECT=/chemin/vers/projet-cible \
-  docker compose run --rm skill-distiller check <sujet>
+TARGET_PROJECT=/chemin/vers/projet-cible docker compose up -d
 ```
 
-Sans compose :
+**Usage ponctuel** (sans compose) : un conteneur par commande, détruit à
+la fin :
 
 ```
 docker run --rm -v /chemin/vers/projet-cible:/work skill-distiller diff <sujet> --fetch
@@ -171,9 +184,75 @@ docker run --rm -v /chemin/vers/projet-cible:/work skill-distiller diff <sujet> 
 Les tests de la CLI se lancent dans le conteneur :
 
 ```
-docker run --rm --entrypoint python3 skill-distiller \
-  -m unittest discover -s /opt/skill-distiller/tests
+docker compose exec skill-distiller python3 -m unittest discover -s /opt/skill-distiller/tests
 ```
+
+### Façade MCP (pour les agents)
+
+Le produit reste un outil autonome (la CLI ci-dessus) ; la façade MCP en
+est la **prise standard** qui le rend branchable par n'importe quel
+agent compatible (Claude Code, VS Code, Codex…). Elle sert les trois
+facettes du produit par le même connecteur :
+
+- **outils de commande** : `skill_distiller_init`, `_check`, `_diff`,
+  `_new` — mêmes sémantiques que les commandes CLI (chaque appel exécute
+  la commande, pas de logique dupliquée) ;
+- **outils de contenu** : `skill_distiller_state` (inventaire du lot),
+  `_read` (récupérer un artefact ou une source), `_write` (**rendre un
+  résultat**) — le lot se consulte et se rend entièrement par le MCP ;
+- **skill** : `SKILL.md` + `templates/` servis au format Agent Skills
+  (extension MCP Skills, `skill://skill-distiller/…`), avec leurs
+  digests SHA-256 — le workflow est distribué par l'outil lui-même,
+  versionné avec lui.
+
+Pour `write`, l'agent ne choisit pas de chemin : il **étiquette** son
+résultat, et c'est skill-distiller qui le range au bon endroit du lot —
+`fiche`, `synthese-brute`, `reconciliation`, `synthese-reconciliee`,
+`amendements`, `skill-final`, `source:<id>/<fichier>`,
+`source-actuelle:<id>/<fichier>`, `cycle:<date>:<artefact>`. Les
+équivalences vers les fichiers (`00-fiche-sources.yaml`, `sources/<id>/`,
+`reintegrations/<date>/`…) sont l'affaire de l'outil.
+
+Deux transports :
+
+```
+python3 <chemin>/bin/skill-distiller mcp                      # stdio
+python3 <chemin>/bin/skill-distiller mcp --http 0.0.0.0:8080  # URL
+```
+
+- **stdio** : l'agent lance la commande lui-même (l'outil est installé
+  là où l'agent tourne) — pas de serveur, pas de réseau ;
+- **HTTP streamable** : le conteneur expose une URL pour les agents qui
+  ne peuvent rien lancer. Avec le compose, le service
+  `skill-distiller-mcp` partage `/work` (le projet cible) et se joint
+  depuis un autre conteneur du réseau :
+
+  ```
+  docker compose up -d skill-distiller-mcp
+  # depuis le conteneur du projet cible :
+  #   http://skill-distiller-mcp:8080/mcp
+  ```
+
+**Mode nominal — « pur MCP »** : l'agent hôte n'a besoin d'aucun accès
+disque. Il charge le skill, consulte le lot (`state`, `read`), fait le
+travail selon le workflow, puis rend chaque résultat (`write`) : « voilà
+la synthèse du lot X, range-la chez toi ». Tout reste chez
+skill-distiller — un agent peut disparaître en cours de lot, une autre
+session reprend sans rien d'autre que le MCP. L'agent peut conserver des
+copies chez lui s'il le souhaite, mais rien n'en dépend.
+
+Garde-fous : sept outils fixes (jamais de commande libre), paramètres
+validés (sujet en slug, `dir` sur un seul segment, `project` limité à un
+répertoire existant), **écriture de contenu confinée au lot** (références
+validées, aucun échappement de chemin, plafond de 512 KiB par contenu),
+ressources du skill servies depuis une liste fermée. Le projet cible est
+celui monté en `/work` (ou précisé par l'outil, paramètre `project`).
+Un code de sortie non nul de la CLI est rendu en `isError` — par exemple
+`check` avec des erreurs restantes.
+
+⚠️ L'endpoint n'embarque **pas** d'authentification : restez sur un
+réseau de confiance (le réseau interne du compose). Une exposition
+publique exige une couche d'authentification en amont.
 
 ## Positionnement
 

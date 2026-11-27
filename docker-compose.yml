@@ -1,14 +1,31 @@
-# Lance la CLI skill-distiller sur un projet cible monté en volume.
+# Conteneur longue durée : la CLI s'exécute par `exec` dans le conteneur
+# déjà lancé, sans en recréer un à chaque commande.
 #
-#   TARGET_PROJECT=/chemin/vers/projet-cible \
-#     docker compose run --rm skill-distiller init <sujet>
+#   docker compose up -d
+#   docker compose exec skill-distiller skill-distiller init <sujet>
+#   docker compose down
 #
-# TARGET_PROJECT défaut sur le répertoire courant.
+# TARGET_PROJECT (défaut : répertoire courant) désigne le projet cible,
+# monté en /work — la racine attendue par la CLI.
 
 services:
   skill-distiller:
     build: .
     image: skill-distiller
     working_dir: /work
+    # Surcharge l'entrypoint CLI de l'image : le service reste en vie,
+    # prêt à recevoir des `exec`.
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ${TARGET_PROJECT:-.}:/work
+
+  # Façade MCP : sert les outils init/check/diff/new et le skill
+  # skill-distiller aux agents compatibles. URL joignable depuis un
+  # conteneur du même réseau : http://skill-distiller-mcp:8080/mcp.
+  # Même volume /work : la CLI agit sur le projet cible, comme `exec`.
+  skill-distiller-mcp:
+    build: .
+    image: skill-distiller
+    command: ["mcp", "--http", "0.0.0.0:8080"]
     volumes:
       - ${TARGET_PROJECT:-.}:/work

@@ -39,6 +39,32 @@ Le skill final les fusionne — sans jamais mélanger les deux en silence.
 - **Justifier** chaque règle non évidente : le pourquoi, pas seulement le
   quoi.
 
+## Exécution et contenus
+
+Deux modes de travail. Le premier est le mode nominal : un agent y fait
+tout le lot **sans rien stocker chez lui**.
+
+1. **Pur MCP** — tout passe par les outils `skill_distiller_*` du
+   serveur qui sert ce skill :
+   - les commandes : `init` (ouvrir le lot), `check` (contrôle),
+     `diff` (réintégration), `new` (ossature du skill final) ;
+   - les contenus : `state` (où en est le lot), `read` (récupérer un
+     artefact ou une source), `write` (**rendre un résultat**).
+   Pour `write`, l'agent donne l'étiquette du résultat — `fiche`,
+   `synthese-brute`, `reconciliation`, `synthese-reconciliee`,
+   `amendements`, `skill-final`, `source:<id>/<fichier>`,
+   `source-actuelle:<id>/<fichier>`, `cycle:<date>:<artefact>` — et c'est
+   skill-distiller qui le range au bon endroit. Rien n'est stocké côté
+   agent : le lot est la mémoire de l'outil, un agent peut disparaître et
+   un autre reprendre là où il s'est arrêté (`state`, puis `read`).
+2. **CLI directe** (repli) — `python3 <chemin>/bin/skill-distiller
+   <commande> <sujet>` depuis la racine du projet cible (ou Docker) ;
+   les artefacts sont alors lus et écrits en fichiers locaux
+   (`threads/<sujet>/`), selon les noms de `00-` à `05-`.
+
+Quelle que soit la voie, le lot vit chez skill-distiller (projet cible) :
+jamais dans le dépôt de skill-distiller lui-même.
+
 ## Artefacts
 
 Répertoire de travail : `threads/<sujet>/`, à la racine du projet cible.
