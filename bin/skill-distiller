@@ -650,7 +650,8 @@ def build_parser():
         help="sert la CLI et le skill en MCP (stdio par défaut, HTTP avec --http)",
     )
     p_mcp.add_argument("--http", metavar="HOST:PORT", default=None,
-                       help="transport HTTP streamable (défaut : stdio)")
+                       help="transport HTTP streamable (défaut : stdio ; "
+                            "sinon SKILL_DISTILLER_MCP_ADDR)")
     return parser
 
 

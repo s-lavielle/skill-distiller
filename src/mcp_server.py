@@ -17,13 +17,23 @@ Sans dépendance (bibliothèque standard Python 3). Deux transports :
     skill-distiller mcp                      # stdio (l'agent lance la commande)
     skill-distiller mcp --http 0.0.0.0:8080  # HTTP streamable (URL)
 
+Configuration par variables d'environnement — un orchestrateur pilote le
+service sans connaître la CLI, quel que soit l'agent hôte :
+- SKILL_DISTILLER_MCP_ADDR : adresse par défaut de --http (sinon stdio) ;
+- SKILL_DISTILLER_MCP_TOKEN : jeton Bearer optionnel du transport HTTP.
+
+GET /health répond 200 : sonde de disponibilité pour Docker HEALTHCHECK,
+Kubernetes ou tout superviseur.
+
 Garde-fous : pas d'outil de commande libre, paramètres validés (sujet en
 slug, dir sur un seul segment), fichiers du skill servis depuis une liste
 fermée (SKILL.md + templates/) — jamais d'arbitraire dans le chemin.
 """
 
 import hashlib
+import hmac
 import json
+import os
 import re
 import subprocess
 import sys
@@ -661,10 +671,12 @@ class McpHttpServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, address, processor):
+    def __init__(self, address, processor, token=None):
         super().__init__(address, McpHttpHandler)
         self.processor = processor
         self.sessions = set()
+        # Jeton Bearer optionnel (SKILL_DISTILLER_MCP_TOKEN) ; None = ouvert.
+        self.token = token
 
 
 class McpHttpHandler(BaseHTTPRequestHandler):
@@ -681,6 +693,8 @@ class McpHttpHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.rstrip("/") != "/mcp":
             self.send_error(404)
+            return
+        if not self._authorized():
             return
         session = self.headers.get("Mcp-Session-Id")
         if session and session not in self.server.sessions:
@@ -710,9 +724,18 @@ class McpHttpHandler(BaseHTTPRequestHandler):
         self._send_json(response, 200, headers)
 
     def do_GET(self):
+        # Sonde de disponibilité : volontairement hors jeton, elle ne
+        # révèle que l'existence du service (200/401 dit déjà la même chose).
+        if self.path.rstrip("/") == "/health":
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_error(405, "pas de flux serveur (POST uniquement)")
 
     def do_DELETE(self):
+        if not self._authorized():
+            return
         session = self.headers.get("Mcp-Session-Id")
         if session in self.server.sessions:
             self.server.sessions.discard(session)
@@ -721,6 +744,25 @@ class McpHttpHandler(BaseHTTPRequestHandler):
             self.end_headers()
         else:
             self.send_error(405, "sessions non gérées côté client")
+
+    def _authorized(self):
+        """Contrôle du jeton Bearer si SKILL_DISTILLER_MCP_TOKEN est posé.
+
+        Sans la variable : aucun contrôle (comportement d'origine, réseau
+        de confiance). Avec : toute requête sans en-tête
+        `Authorization: Bearer <jeton>` est refusée en 401. Comparaison en
+        temps constant (hmac.compare_digest) : pas de fuite par timing.
+        """
+        expected = self.server.token
+        if not expected:
+            return True
+        got = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if got.startswith(prefix) and hmac.compare_digest(
+                got[len(prefix):].strip(), expected):
+            return True
+        self.send_error(401, "jeton attendu (Authorization: Bearer ...)")
+        return False
 
     def _send_json(self, payload, status, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -737,7 +779,7 @@ class McpHttpHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_http(processor, spec):
+def run_http(processor, spec, token=None):
     """Démarre le serveur HTTP sur HOST:PORT (host défaut : 127.0.0.1)."""
     m = re.match(HTTP_RE, spec)
     if not m:
@@ -747,9 +789,10 @@ def run_http(processor, spec):
     port = int(m.group("port"))
     if not 1 <= port <= 65535:
         raise RpcError(INVALID_PARAMS, f"port invalide : {port}")
-    server = McpHttpServer((host, port), processor)
+    server = McpHttpServer((host, port), processor, token=token)
     shown_host = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
-    print(f"MCP HTTP sur http://{shown_host}:{server.server_address[1]}/mcp")
+    print(f"MCP HTTP sur http://{shown_host}:{server.server_address[1]}/mcp"
+          + (" (jeton Bearer exigé)" if token else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -758,11 +801,28 @@ def run_http(processor, spec):
         server.server_close()
 
 
+def http_addr(cli_value=None):
+    """Adresse HTTP effective : argument CLI, sinon env, sinon None (stdio).
+
+    Repli 12-factor isolé en fonction testable : un orchestrateur pilote
+    le transport par l'environnement sans connaître la CLI.
+    """
+    return cli_value or os.environ.get("SKILL_DISTILLER_MCP_ADDR") or None
+
+
 def serve(http=None):
-    """Point d'entrée appelé par la CLI : stdio par défaut, HTTP avec --http."""
+    """Point d'entrée appelé par la CLI : stdio par défaut, HTTP avec --http.
+
+    Repli d'adresse : sans --http mais avec SKILL_DISTILLER_MCP_ADDR, le
+    transport HTTP démarre sur cette adresse (config 12-factor : un
+    orchestrateur pilote le service par l'environnement, sans connaître
+    la CLI). L'argument explicite reste prioritaire.
+    """
+    http = http_addr(http)
+    token = os.environ.get("SKILL_DISTILLER_MCP_TOKEN") or None
     processor = McpProcessor()
     if http is not None:
-        run_http(processor, http)
+        run_http(processor, http, token=token)
     else:
         run_stdio(processor)
 

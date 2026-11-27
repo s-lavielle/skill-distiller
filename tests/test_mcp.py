@@ -16,6 +16,7 @@ import http.server
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -391,6 +393,79 @@ class McpHttpTestCase(unittest.TestCase):
         status, _, _ = self.post(
             {"jsonrpc": "2.0", "id": 3, "method": "ping"}, session="inconnue")
         self.assertEqual(status, 404)
+
+
+class HttpExploitationTestCase(unittest.TestCase):
+    """Sonde /health, jeton Bearer optionnel et repli d'adresse par env.
+
+    Pourquoi : ces contrats d'exploitation sont ce qui rend la façade
+    utilisable depuis n'importe quel contexte agentique — un superviseur
+    (Docker HEALTHCHECK, Kubernetes) a besoin d'une sonde stable, un
+    déploiement exposé d'une authentification sans couche en amont, un
+    orchestrateur d'un pilotage par variables d'environnement. Une
+    régression ici rendrait le service inexploitable — ou dangereux.
+    """
+
+    def _server(self, token=None):
+        server = mcp_server.McpHttpServer(
+            ("127.0.0.1", 0), mcp_server.McpProcessor(), token=token)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _request(self, base, path, method="POST", headers=None, message=None):
+        import urllib.request
+        data = json.dumps(message).encode("utf-8") if message is not None else None
+        request = urllib.request.Request(
+            base + path, data=data, method=method,
+            headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def test_health_repond_200_et_le_get_reste_refuse_ailleurs(self):
+        base = self._server()
+        self.assertEqual(self._request(base, "/health", method="GET"), 200)
+        self.assertEqual(self._request(base, "/mcp", method="GET"), 405)
+
+    def test_health_rest_disponible_sans_jeton(self):
+        """La sonde ne révèle que l'existence du service : elle reste
+        ouverte même quand le jeton protège /mcp."""
+        base = self._server(token="secret")
+        self.assertEqual(self._request(base, "/health", method="GET"), 200)
+
+    def test_jeton_bearer_exige_quand_il_est_configure(self):
+        base = self._server(token="secret")
+        ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        self.assertEqual(self._request(base, "/mcp", message=ping), 401)
+        self.assertEqual(
+            self._request(base, "/mcp", message=ping,
+                          headers={"Authorization": "Bearer mauvais"}), 401)
+        self.assertEqual(
+            self._request(base, "/mcp", message=ping,
+                          headers={"Authorization": "Bearer secret"}), 200)
+
+    def test_sans_jeton_le_service_rest_ouvert(self):
+        """Comportement d'origine préservé : sans variable, pas de contrôle."""
+        base = self._server()
+        self.assertEqual(
+            self._request(base, "/mcp",
+                          message={"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            200)
+
+    def test_adresse_http_l_argument_cli_prime_sur_l_env(self):
+        with unittest.mock.patch.dict(
+                os.environ, {"SKILL_DISTILLER_MCP_ADDR": "0.0.0.0:9999"}):
+            self.assertEqual(mcp_server.http_addr("0.0.0.0:8080"), "0.0.0.0:8080")
+            self.assertEqual(mcp_server.http_addr(), "0.0.0.0:9999")
+
+    def test_adresse_http_absente_laisse_le_stdio(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(mcp_server.http_addr())
 
 
 class RangementTestCase(unittest.TestCase):

@@ -233,6 +233,18 @@ python3 <chemin>/bin/skill-distiller mcp --http 0.0.0.0:8080  # URL
   #   http://skill-distiller-mcp:8080/mcp
   ```
 
+Le service HTTP se pilote par l'environnement — un orchestrateur
+quelconque n'a pas à connaître la CLI :
+
+| Variable | Effet |
+| --- | --- |
+| `SKILL_DISTILLER_MCP_ADDR` | adresse par défaut de `--http` (ex. `0.0.0.0:8080`) — l'argument explicite reste prioritaire |
+| `SKILL_DISTILLER_MCP_TOKEN` | jeton Bearer optionnel : avec la variable, toute requête `/mcp` sans `Authorization: Bearer <jeton>` est refusée (401) |
+
+`GET /health` répond 200 : sonde de disponibilité pour Docker
+`HEALTHCHECK`, Kubernetes ou tout superviseur. Elle reste accessible
+sans jeton (elle ne révèle que l'existence du service).
+
 **Mode nominal — « pur MCP »** : l'agent hôte n'a besoin d'aucun accès
 disque. Il charge le skill, consulte le lot (`state`, `read`), fait le
 travail selon le workflow, puis rend chaque résultat (`write`) : « voilà
@@ -250,9 +262,10 @@ celui monté en `/work` (ou précisé par l'outil, paramètre `project`).
 Un code de sortie non nul de la CLI est rendu en `isError` — par exemple
 `check` avec des erreurs restantes.
 
-⚠️ L'endpoint n'embarque **pas** d'authentification : restez sur un
-réseau de confiance (le réseau interne du compose). Une exposition
-publique exige une couche d'authentification en amont.
+⚠️ Sans `SKILL_DISTILLER_MCP_TOKEN`, l'endpoint n'embarque **pas**
+d'authentification : restez sur un réseau de confiance (le réseau
+interne du compose). Une exposition publique exige le jeton ci-dessus ou
+une couche d'authentification en amont.
 
 ## Positionnement
 
