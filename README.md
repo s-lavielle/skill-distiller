@@ -155,6 +155,13 @@ Construire l'image :
 docker build -t skill-distiller .
 ```
 
+Une image pré-construite est publiée sur GHCR (workflow
+`.github/workflows/image.yml`, tags `latest` + version + SHA) :
+
+```
+docker pull ghcr.io/s-lavielle/skill-distiller:latest
+```
+
 **Modèle compose — conteneur longue durée** : le service reste en vie, la
 CLI s'exécute par `exec` sans recréer de conteneur à chaque commande. Le
 projet cible est monté en `/work`, répertoire de travail du conteneur

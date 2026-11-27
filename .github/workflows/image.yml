@@ -1,0 +1,51 @@
+# Publication de l'image skill-distiller sur GHCR.
+#
+# Pourquoi : n'importe quelle stack peut consommer l'outil sans le
+# builder (`image: ghcr.io/s-lavielle/skill-distiller:<tag>`) — c'est le
+# pendant packagé du modèle compose. Le Dockerfile unique fait foi ; ce
+# workflow ne fait que le publier.
+#
+# Tags produits :
+#   - sur push main : `latest` + SHA court ;
+#   - sur tag vX.Y.Z : la version (ex. 1.2.0, 1.2, 1).
+#
+# L'image est publique en lecture ; le build utilise le GITHUB_TOKEN.
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
